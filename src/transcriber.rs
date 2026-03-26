@@ -60,25 +60,32 @@ impl Transcriber {
 
     /// Find the model file, checking bundle Resources first, then local models/ dir
     pub fn find_model(model_name: &str) -> Option<PathBuf> {
-        let filename = format!("ggml-{}.en.bin", model_name);
+        // Try multiple filename patterns (some models don't have .en variant)
+        let candidates = vec![
+            format!("ggml-{}.en.bin", model_name),
+            format!("ggml-{}.bin", model_name),
+            format!("ggml-{}-v3.bin", model_name),
+        ];
 
-        // Check inside .app bundle: ../Resources/models/
-        if let Ok(exe) = std::env::current_exe() {
-            let bundle_models = exe
-                .parent() // MacOS/
-                .and_then(|p| p.parent()) // Contents/
-                .map(|p| p.join("Resources").join("models").join(&filename));
-            if let Some(path) = bundle_models {
-                if path.exists() {
-                    return Some(path);
+        for filename in &candidates {
+            // Check inside .app bundle: ../Resources/models/
+            if let Ok(exe) = std::env::current_exe() {
+                let bundle_models = exe
+                    .parent() // MacOS/
+                    .and_then(|p| p.parent()) // Contents/
+                    .map(|p| p.join("Resources").join("models").join(filename));
+                if let Some(path) = bundle_models {
+                    if path.exists() {
+                        return Some(path);
+                    }
                 }
             }
-        }
 
-        // Check local models/ directory (for development)
-        let local = PathBuf::from("models").join(&filename);
-        if local.exists() {
-            return Some(local);
+            // Check local models/ directory (for development)
+            let local = PathBuf::from("models").join(filename);
+            if local.exists() {
+                return Some(local);
+            }
         }
 
         None

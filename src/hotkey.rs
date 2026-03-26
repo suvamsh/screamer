@@ -1,3 +1,4 @@
+use crate::config::Config;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2_app_kit::NSEvent;
@@ -22,7 +23,7 @@ impl Hotkey {
     }
 
     /// Start listening using NSEvent global monitor on the main thread.
-    /// This must be called from the main thread before NSApp.run().
+    /// Reads hotkey config to determine which modifier key to watch.
     pub fn start_on_main_thread(
         &self,
         mtm: MainThreadMarker,
@@ -30,6 +31,15 @@ impl Hotkey {
         on_release: impl Fn() + 'static,
     ) {
         let is_pressed = self.is_pressed.clone();
+
+        let config = Config::load();
+        let hotkey_info = config.hotkey_info();
+        let modifier_flag = hotkey_info.modifier_flag;
+        let device_flag = hotkey_info.device_flag;
+        let hotkey_name = hotkey_info.label;
+
+        eprintln!("[screamer] Hotkey configured: {} (modifier=0x{:x}, device=0x{:x})",
+            hotkey_name, modifier_flag, device_flag);
 
         // NSEventMaskFlagsChanged = 1 << 12 = 4096
         let mask: u64 = 1 << 12;
@@ -40,17 +50,24 @@ impl Hotkey {
             }
             let flags: u64 = unsafe { msg_send![event, modifierFlags] };
 
-            // kCGEventFlagMaskControl = 0x00040000 = 262144
-            let control_down = (flags & 0x00040000) != 0;
+            // Check if the modifier is down (device-independent)
+            let modifier_down = (flags & modifier_flag) != 0;
+
+            // If we have a device-specific flag, also check that
+            let key_down = if device_flag != 0 {
+                modifier_down && (flags & device_flag) != 0
+            } else {
+                modifier_down
+            };
 
             let was_pressed = is_pressed.load(Ordering::SeqCst);
 
-            if control_down && !was_pressed {
-                eprintln!("[screamer] Control PRESSED (flags=0x{:x})", flags);
+            if key_down && !was_pressed {
+                eprintln!("[screamer] Hotkey PRESSED (flags=0x{:x})", flags);
                 is_pressed.store(true, Ordering::SeqCst);
                 on_press();
-            } else if !control_down && was_pressed {
-                eprintln!("[screamer] Control RELEASED (flags=0x{:x})", flags);
+            } else if !key_down && was_pressed {
+                eprintln!("[screamer] Hotkey RELEASED (flags=0x{:x})", flags);
                 is_pressed.store(false, Ordering::SeqCst);
                 on_release();
             }
