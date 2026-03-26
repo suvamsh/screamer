@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+Screamer.app/
+*.dmg
+dmg_temp/
+
+# Models (large binary files — download with ./download_model.sh)
+models/*.bin
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Icon build intermediates
+resources/icon.iconset/
+resources/menubar_icon.png
+resources/menubar_icon@2x.png

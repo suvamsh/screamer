@@ -1,0 +1,77 @@
+[package]
+name = "screamer"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+whisper-rs = { version = "0.14", features = ["metal"] }
+cpal = "0.15"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSTimer",
+    "NSThread",
+    "NSRunLoop",
+    "NSNotification",
+    "NSValue",
+    "NSRange",
+    "NSGeometry",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFCGTypes",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPanel",
+    "NSWindow",
+    "NSView",
+    "NSVisualEffectView",
+    "NSColor",
+    "NSTextField",
+    "NSImage",
+    "NSPasteboard",
+    "NSAnimationContext",
+    "NSAnimation",
+    "NSScreen",
+    "NSGraphicsContext",
+    "NSGraphics",
+    "NSBezierPath",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSEvent",
+    "NSAlert",
+    "NSRunningApplication",
+    "NSResponder",
+    "NSText",
+    "NSControl",
+    "NSButton",
+    "NSImageView",
+    "NSWindowScripting",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+core-graphics = "0.24"
+core-foundation = "0.10"
+arboard = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+libc = "0.2"
+log = "0.4"
+oslog = "0.2"
+
+[build-dependencies]
+cc = "1"
+
+[patch.crates-io]
+whisper-rs-sys = { path = "patches/whisper-rs-sys" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
