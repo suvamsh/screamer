@@ -1,4 +1,4 @@
-use crate::config::{Config, HOTKEYS, MODELS};
+use crate::config::{Config, HOTKEYS, MODELS, POSITIONS};
 use crate::overlay::Overlay;
 use crate::recorder::Recorder;
 use crate::transcriber::Transcriber;
@@ -15,12 +15,17 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+// Thread-local overlay reference so menu handlers can update position without relaunch.
+// Safe because all menu handlers and overlay access run on the main thread.
+thread_local! {
+    static OVERLAY: RefCell<Option<Rc<RefCell<Overlay>>>> = const { RefCell::new(None) };
+}
+
 pub struct App {
     _status_item: Retained<NSStatusItem>,
     overlay: Rc<RefCell<Overlay>>,
     recorder: Arc<Recorder>,
     transcriber: Arc<Transcriber>,
-    _config: Config,
     is_recording: Arc<AtomicBool>,
 }
 
@@ -40,6 +45,10 @@ fn menu_handler_class() -> &'static AnyClass {
             builder.add_method(
                 sel!(selectHotkey:),
                 select_hotkey_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(selectPosition:),
+                select_position_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -61,26 +70,24 @@ extern "C" fn select_model_action(_this: *mut AnyObject, _sel: Sel, sender: *mut
     if let Some(model_info) = MODELS.get(tag as usize) {
         eprintln!("[screamer] Model selected: {}", model_info.id);
 
-        // Check if model file exists before switching
         if Transcriber::find_model(model_info.id).is_none() {
             eprintln!("[screamer] Model not found: {}", model_info.id);
-            // Show alert on main thread
             if let Some(mtm) = MainThreadMarker::new() {
-                unsafe {
-                    let alert = NSAlert::new(mtm);
-                    alert.setAlertStyle(NSAlertStyle::Warning);
-                    alert.setMessageText(&NSString::from_str("Model Not Downloaded"));
-                    alert.setInformativeText(&NSString::from_str(&format!(
-                        "The {} model ({}) hasn't been downloaded yet.\n\n\
-                         Run this in Terminal:\n\
-                         cd {} && ./download_model.sh {}",
-                        model_info.label,
-                        model_info.size,
-                        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
-                        model_info.id
-                    )));
-                    alert.runModal();
-                }
+                let alert = NSAlert::new(mtm);
+                alert.setAlertStyle(NSAlertStyle::Warning);
+                alert.setMessageText(&NSString::from_str("Model Not Downloaded"));
+                alert.setInformativeText(&NSString::from_str(&format!(
+                    "The {} model ({}) hasn't been downloaded yet.\n\n\
+                     Run this in Terminal:\n\
+                     cd {} && ./download_model.sh {}",
+                    model_info.label,
+                    model_info.size,
+                    std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    model_info.id
+                )));
+                alert.runModal();
             }
             return;
         }
@@ -103,13 +110,35 @@ extern "C" fn select_hotkey_action(_this: *mut AnyObject, _sel: Sel, sender: *mu
     }
 }
 
+extern "C" fn select_position_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
+    let tag: isize = unsafe { msg_send![sender, tag] };
+    if let Some(pos_info) = POSITIONS.get(tag as usize) {
+        eprintln!("[screamer] Position selected: {}", pos_info.label);
+
+        let mut config = Config::load();
+        config.overlay_position = pos_info.id;
+        config.save();
+
+        // Apply immediately without relaunch
+        if let Some(mtm) = MainThreadMarker::new() {
+            OVERLAY.with(|cell| {
+                if let Some(overlay) = cell.borrow().as_ref() {
+                    if let Ok(mut ov) = overlay.try_borrow_mut() {
+                        ov.set_position(mtm, pos_info.id);
+                    }
+                }
+            });
+        }
+    }
+}
+
 fn relaunch() {
     eprintln!("[screamer] Relaunching...");
-    // Find the .app bundle path (go up from MacOS/Screamer → Contents → Screamer.app)
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(app_path) = exe.parent()   // MacOS/
-            .and_then(|p| p.parent())           // Contents/
-            .and_then(|p| p.parent())           // Screamer.app
+        if let Some(app_path) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
         {
             let app_str = app_path.display().to_string();
             eprintln!("[screamer] Relaunching from: {}", app_str);
@@ -118,7 +147,6 @@ fn relaunch() {
                 .arg(format!("sleep 0.5 && open -a '{}'", app_str))
                 .spawn();
         } else {
-            // Running from cargo — just relaunch the binary directly
             let exe_str = exe.display().to_string();
             eprintln!("[screamer] Relaunching binary: {}", exe_str);
             let _ = std::process::Command::new("sh")
@@ -128,10 +156,9 @@ fn relaunch() {
         }
     }
 
-    // Terminate current instance
     if let Some(mtm) = MainThreadMarker::new() {
         let app = NSApplication::sharedApplication(mtm);
-        unsafe { app.terminate(None) };
+        app.terminate(None);
     }
 }
 
@@ -141,7 +168,6 @@ impl App {
     pub fn new(mtm: MainThreadMarker) -> Option<Self> {
         let config = Config::load();
 
-        // Find and load whisper model
         let model_path = match Transcriber::find_model(&config.model) {
             Some(p) => p,
             None => {
@@ -172,15 +198,17 @@ impl App {
         log::info!("Model loaded successfully");
 
         let recorder = Arc::new(Recorder::new());
-        let overlay = Rc::new(RefCell::new(Overlay::new(mtm)));
+        let overlay = Rc::new(RefCell::new(Overlay::new(mtm, config.overlay_position)));
 
-        // Create menubar status item
-        let status_bar = unsafe { NSStatusBar::systemStatusBar() };
-        let status_item = unsafe {
-            status_bar.statusItemWithLength(objc2_app_kit::NSSquareStatusItemLength)
-        };
+        // Store overlay reference for position menu handler
+        OVERLAY.with(|cell| {
+            *cell.borrow_mut() = Some(overlay.clone());
+        });
 
-        // Set the button icon
+        let status_bar = NSStatusBar::systemStatusBar();
+        let status_item =
+            status_bar.statusItemWithLength(objc2_app_kit::NSSquareStatusItemLength);
+
         if let Some(button) = status_item.button(mtm) {
             let icon_name = NSString::from_str("menubarTemplate");
             if let Some(image) = objc2_app_kit::NSImage::imageNamed(&icon_name) {
@@ -194,19 +222,14 @@ impl App {
             }
         }
 
-        // Build menu
         let menu = Self::build_menu(mtm, &config);
-
-        unsafe {
-            status_item.setMenu(Some(&menu));
-        }
+        status_item.setMenu(Some(&menu));
 
         Some(Self {
             _status_item: status_item,
             overlay,
             recorder,
             transcriber,
-            _config: config,
             is_recording: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -217,7 +240,6 @@ impl App {
         unsafe {
             let menu = NSMenu::new(mtm);
 
-            // ── Status line ──
             let status_line = NSMenuItem::new(mtm);
             status_line.setTitle(&NSString::from_str("Screamer — Ready"));
             status_line.setEnabled(false);
@@ -244,9 +266,8 @@ impl App {
                 let _: () = msg_send![&*item, setTarget: handler];
                 item.setAction(Some(sel!(selectModel:)));
 
-                // Checkmark on current model
                 if model_info.id == config.model {
-                    item.setState(1); // NSControlStateValueOn
+                    item.setState(1);
                 }
 
                 model_submenu.addItem(&item);
@@ -257,7 +278,8 @@ impl App {
 
             // ── Hotkey submenu ──
             let hotkey_item = NSMenuItem::new(mtm);
-            hotkey_item.setTitle(&NSString::from_str(&format!("Hotkey: {}", config.hotkey_label())));
+            hotkey_item
+                .setTitle(&NSString::from_str(&format!("Hotkey: {}", config.hotkey_label())));
             let hotkey_submenu = NSMenu::new(mtm);
             hotkey_submenu.setTitle(&NSString::from_str("Hotkey"));
 
@@ -268,9 +290,8 @@ impl App {
                 let _: () = msg_send![&*item, setTarget: handler];
                 item.setAction(Some(sel!(selectHotkey:)));
 
-                // Checkmark on current hotkey
                 if hotkey_info.id == config.hotkey {
-                    item.setState(1); // NSControlStateValueOn
+                    item.setState(1);
                 }
 
                 hotkey_submenu.addItem(&item);
@@ -278,6 +299,32 @@ impl App {
 
             hotkey_item.setSubmenu(Some(&hotkey_submenu));
             menu.addItem(&hotkey_item);
+
+            // ── Position submenu ──
+            let pos_item = NSMenuItem::new(mtm);
+            pos_item.setTitle(&NSString::from_str(&format!(
+                "Position: {}",
+                config.position_label()
+            )));
+            let pos_submenu = NSMenu::new(mtm);
+            pos_submenu.setTitle(&NSString::from_str("Position"));
+
+            for (i, pos_info) in POSITIONS.iter().enumerate() {
+                let item = NSMenuItem::new(mtm);
+                item.setTitle(&NSString::from_str(pos_info.label));
+                item.setTag(i as isize);
+                let _: () = msg_send![&*item, setTarget: handler];
+                item.setAction(Some(sel!(selectPosition:)));
+
+                if pos_info.id == config.overlay_position {
+                    item.setState(1);
+                }
+
+                pos_submenu.addItem(&item);
+            }
+
+            pos_item.setSubmenu(Some(&pos_submenu));
+            menu.addItem(&pos_item);
 
             menu.addItem(&NSMenuItem::separatorItem(mtm));
 
@@ -292,15 +339,14 @@ impl App {
         }
     }
 
-    /// Start the hotkey listener and timer for waveform updates
     pub fn start(&self, mtm: MainThreadMarker) {
         let recorder = self.recorder.clone();
         let transcriber = self.transcriber.clone();
         let is_recording = self.is_recording.clone();
 
-        let rec_for_press = recorder.clone();
-        let rec_for_release = recorder.clone();
-        let trans_for_release = transcriber.clone();
+        let rec_press = recorder.clone();
+        let rec_release = recorder.clone();
+        let trans = transcriber.clone();
         let is_rec_press = is_recording.clone();
         let is_rec_release = is_recording.clone();
 
@@ -309,22 +355,20 @@ impl App {
         hotkey.start_on_main_thread(
             mtm,
             move || {
-                // Key down — start recording
                 if is_rec_press
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    rec_for_press.start();
+                    rec_press.start();
                     eprintln!("[screamer] Recording started");
                 }
             },
             move || {
-                // Key up — stop recording, transcribe, paste
                 if is_rec_release
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    let samples = rec_for_release.stop();
+                    let samples = rec_release.stop();
                     eprintln!("[screamer] Recording stopped, {} samples", samples.len());
 
                     if samples.len() < 4800 {
@@ -332,16 +376,21 @@ impl App {
                         return;
                     }
 
-                    let trans = trans_for_release.clone();
+                    let t = trans.clone();
                     std::thread::spawn(move || {
                         let t0 = std::time::Instant::now();
-                        match trans.transcribe(&samples) {
+                        match t.transcribe(&samples) {
                             Ok(text) if !text.is_empty() => {
                                 let inference_ms = t0.elapsed().as_millis();
-                                eprintln!("[screamer] Transcribed in {}ms: {}", inference_ms, text);
+                                eprintln!(
+                                    "[screamer] Transcribed in {}ms: {}",
+                                    inference_ms, text
+                                );
                                 crate::paster::paste(&text);
-                                let total_ms = t0.elapsed().as_millis();
-                                eprintln!("[screamer] Total latency (inference+paste): {}ms", total_ms);
+                                eprintln!(
+                                    "[screamer] Total latency: {}ms",
+                                    t0.elapsed().as_millis()
+                                );
                             }
                             Ok(_) => {
                                 eprintln!("[screamer] Empty transcription, skipping paste");
@@ -355,7 +404,6 @@ impl App {
             },
         );
 
-        // Start NSTimer for overlay waveform updates (20fps)
         self.start_waveform_timer();
     }
 
@@ -375,8 +423,7 @@ impl App {
                         if !ov.is_visible() {
                             ov.show();
                         }
-                        let amps = recorder.amplitudes();
-                        ov.update_amplitudes(&amps);
+                        ov.update_amplitude(recorder.latest_amplitude());
                     } else if ov.is_visible() {
                         ov.hide();
                     }
@@ -393,12 +440,10 @@ impl App {
     }
 
     fn show_alert(mtm: MainThreadMarker, title: &str, message: &str) {
-        unsafe {
-            let alert = NSAlert::new(mtm);
-            alert.setAlertStyle(NSAlertStyle::Critical);
-            alert.setMessageText(&NSString::from_str(title));
-            alert.setInformativeText(&NSString::from_str(message));
-            alert.runModal();
-        }
+        let alert = NSAlert::new(mtm);
+        alert.setAlertStyle(NSAlertStyle::Critical);
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(message));
+        alert.runModal();
     }
 }

@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 const NUM_BARS: usize = 56;
@@ -8,26 +8,22 @@ const TARGET_SAMPLE_RATE: u32 = 16000;
 
 pub struct Recorder {
     samples: Arc<Mutex<Vec<f32>>>,
-    amplitudes: Arc<[std::sync::atomic::AtomicU32; NUM_BARS]>,
+    amplitudes: Arc<[AtomicU32; NUM_BARS]>,
     amp_index: Arc<AtomicUsize>,
     stream: Mutex<Option<Stream>>,
     chunk_buffer: Arc<Mutex<Vec<f32>>>,
-    device_sample_rate: Mutex<u32>,
+    device_sample_rate: AtomicU32,
 }
 
 impl Recorder {
     pub fn new() -> Self {
-        let amplitudes: Arc<[std::sync::atomic::AtomicU32; NUM_BARS]> = Arc::new(
-            std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
-        );
-
         Self {
-            samples: Arc::new(Mutex::new(Vec::new())),
-            amplitudes,
+            samples: Arc::new(Mutex::new(Vec::with_capacity(16000 * 10))), // pre-alloc ~10s
+            amplitudes: Arc::new(std::array::from_fn(|_| AtomicU32::new(0))),
             amp_index: Arc::new(AtomicUsize::new(0)),
             stream: Mutex::new(None),
-            chunk_buffer: Arc::new(Mutex::new(Vec::new())),
-            device_sample_rate: Mutex::new(TARGET_SAMPLE_RATE),
+            chunk_buffer: Arc::new(Mutex::new(Vec::with_capacity(4800))),
+            device_sample_rate: AtomicU32::new(TARGET_SAMPLE_RATE),
         }
     }
 
@@ -49,7 +45,6 @@ impl Recorder {
             .default_input_device()
             .expect("No input device available");
 
-        // Use the device's default config
         let default_config = device
             .default_input_config()
             .expect("No default input config");
@@ -63,11 +58,8 @@ impl Recorder {
         let sample_rate = default_config.sample_rate().0;
         let channels = default_config.channels();
 
-        if let Ok(mut sr) = self.device_sample_rate.lock() {
-            *sr = sample_rate;
-        }
+        self.device_sample_rate.store(sample_rate, Ordering::Relaxed);
 
-        // Use 1 channel at the device's native sample rate
         let config = cpal::StreamConfig {
             channels,
             sample_rate: cpal::SampleRate(sample_rate),
@@ -79,39 +71,44 @@ impl Recorder {
         let amplitudes = self.amplitudes.clone();
         let amp_index = self.amp_index.clone();
         let chunk_buffer = self.chunk_buffer.clone();
+        let ch = channels as usize;
 
         let stream = device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // If stereo or multi-channel, take only the first channel
-                    let mono: Vec<f32> = if channels > 1 {
-                        data.chunks(channels as usize)
-                            .map(|frame| frame[0])
-                            .collect()
-                    } else {
-                        data.to_vec()
-                    };
-
-                    // Append to full recording buffer
+                    // Append mono samples directly — no intermediate Vec allocation
                     if let Ok(mut s) = samples.lock() {
-                        s.extend_from_slice(&mono);
+                        if ch > 1 {
+                            s.extend(data.chunks(ch).map(|frame| frame[0]));
+                        } else {
+                            s.extend_from_slice(data);
+                        }
                     }
 
-                    // Accumulate into chunk buffer for RMS calculation
+                    // Accumulate for RMS calculation
                     if let Ok(mut cb) = chunk_buffer.lock() {
-                        cb.extend_from_slice(&mono);
+                        if ch > 1 {
+                            cb.extend(data.chunks(ch).map(|frame| frame[0]));
+                        } else {
+                            cb.extend_from_slice(data);
+                        }
 
                         while cb.len() >= chunk_size {
-                            let chunk: Vec<f32> = cb.drain(..chunk_size).collect();
-                            let rms = (chunk.iter().map(|s| s * s).sum::<f32>()
-                                / chunk.len() as f32)
+                            // Compute RMS in-place — no collect()
+                            let rms = (cb[..chunk_size]
+                                .iter()
+                                .map(|s| s * s)
+                                .sum::<f32>()
+                                / chunk_size as f32)
                                 .sqrt();
-                            let normalized = (rms * 10.0).min(1.0);
-                            let encoded = (normalized * 1000.0) as u32;
+                            // Store raw RMS (no boost) — let the overlay handle display scaling
+                            let encoded = (rms.min(1.0) * 10000.0) as u32;
 
                             let idx = amp_index.fetch_add(1, Ordering::Relaxed) % NUM_BARS;
                             amplitudes[idx].store(encoded, Ordering::Relaxed);
+
+                            cb.drain(..chunk_size);
                         }
                     }
                 },
@@ -123,7 +120,10 @@ impl Recorder {
             .expect("Failed to build input stream");
 
         stream.play().expect("Failed to start audio stream");
-        eprintln!("[screamer] Audio stream started ({}Hz, {}ch)", sample_rate, channels);
+        eprintln!(
+            "[screamer] Audio stream started ({}Hz, {}ch)",
+            sample_rate, channels
+        );
 
         if let Ok(mut s) = self.stream.lock() {
             *s = Some(stream);
@@ -136,15 +136,15 @@ impl Recorder {
             *s = None;
         }
 
-        let device_rate = self.device_sample_rate.lock().map(|r| *r).unwrap_or(TARGET_SAMPLE_RATE);
+        let device_rate = self.device_sample_rate.load(Ordering::Relaxed);
 
-        let raw_samples = if let Ok(s) = self.samples.lock() {
-            s.clone()
+        // Take ownership instead of cloning
+        let raw_samples = if let Ok(mut s) = self.samples.lock() {
+            std::mem::take(&mut *s)
         } else {
             return Vec::new();
         };
 
-        // Resample to 16kHz if needed (whisper requires 16kHz)
         if device_rate == TARGET_SAMPLE_RATE {
             raw_samples
         } else {
@@ -152,20 +152,17 @@ impl Recorder {
         }
     }
 
-    pub fn amplitudes(&self) -> [f32; NUM_BARS] {
-        let current_idx = self.amp_index.load(Ordering::Relaxed);
-        let mut result = [0.0f32; NUM_BARS];
-        for i in 0..NUM_BARS {
-            let encoded = self.amplitudes[i].load(Ordering::Relaxed);
-            if current_idx > i {
-                result[i] = encoded as f32 / 1000.0;
-            }
+    /// Returns the most recent raw RMS amplitude value (0.0–1.0).
+    pub fn latest_amplitude(&self) -> f32 {
+        let idx = self.amp_index.load(Ordering::Relaxed);
+        if idx == 0 {
+            return 0.0;
         }
-        result
+        self.amplitudes[(idx - 1) % NUM_BARS].load(Ordering::Relaxed) as f32 / 10000.0
     }
 }
 
-/// Simple linear interpolation resampler
+/// Linear interpolation resampler
 fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if from_rate == to_rate || input.is_empty() {
         return input.to_vec();
@@ -178,17 +175,17 @@ fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     for i in 0..output_len {
         let src_idx = i as f64 * ratio;
         let idx = src_idx as usize;
-        let frac = src_idx - idx as f64;
+        let frac = (src_idx - idx as f64) as f32;
 
         let sample = if idx + 1 < input.len() {
-            input[idx] as f64 * (1.0 - frac) + input[idx + 1] as f64 * frac
+            input[idx] * (1.0 - frac) + input[idx + 1] * frac
         } else if idx < input.len() {
-            input[idx] as f64
+            input[idx]
         } else {
             0.0
         };
 
-        output.push(sample as f32);
+        output.push(sample);
     }
 
     output
@@ -197,3 +194,62 @@ fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 // SAFETY: Stream is Send but not Sync by default. We protect it with a Mutex.
 unsafe impl Send for Recorder {}
 unsafe impl Sync for Recorder {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_identity() {
+        let input = vec![1.0, 2.0, 3.0, 4.0];
+        let output = resample(&input, 16000, 16000);
+        assert_eq!(input, output);
+    }
+
+    #[test]
+    fn resample_empty() {
+        let output = resample(&[], 48000, 16000);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn resample_downsample_3x() {
+        // 48kHz -> 16kHz = 3:1 ratio
+        let input: Vec<f32> = (0..48).map(|i| i as f32).collect();
+        let output = resample(&input, 48000, 16000);
+        assert_eq!(output.len(), 16);
+        // First sample should be 0.0
+        assert!((output[0] - 0.0).abs() < 0.01);
+        // Second sample should interpolate around index 3.0
+        assert!((output[1] - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn resample_upsample_2x() {
+        let input = vec![0.0, 1.0, 2.0, 3.0];
+        let output = resample(&input, 16000, 32000);
+        assert_eq!(output.len(), 8);
+        // Should interpolate: 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, ...
+        assert!((output[0] - 0.0).abs() < 0.01);
+        assert!((output[1] - 0.5).abs() < 0.01);
+        assert!((output[2] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn resample_preserves_approximate_length() {
+        let input: Vec<f32> = vec![0.0; 48000]; // 1 second at 48kHz
+        let output = resample(&input, 48000, 16000);
+        // Should be approximately 16000 samples (1 second at 16kHz)
+        assert!((output.len() as i32 - 16000).abs() <= 1);
+    }
+
+    #[test]
+    fn resample_interpolation_accuracy() {
+        // Linear ramp: output should also be a linear ramp
+        let input: Vec<f32> = (0..100).map(|i| i as f32 / 99.0).collect();
+        let output = resample(&input, 100, 50);
+        for i in 1..output.len() {
+            assert!(output[i] >= output[i - 1], "output should be monotonically increasing");
+        }
+    }
+}

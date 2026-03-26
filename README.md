@@ -4,7 +4,7 @@
 
 # Screamer
 
-**The fastest push-to-talk transcription app for macOS.**
+**A fast, fully local push-to-talk transcription app for macOS.**
 
 Hold a key. Speak. Release. Text appears instantly.
 
@@ -17,7 +17,7 @@ Hold a key. Speak. Release. Text appears instantly.
 
 <br>
 
-> **134ms** from key release to text pasted. No cloud. No subscription. No data leaves your machine.
+> **~100ms** median Whisper inference on Apple M2 Max with `base.en`. No cloud. No subscription. No data leaves your machine.
 
 <br>
 
@@ -37,38 +37,36 @@ A frosted-glass waveform overlay appears while you speak. When you release, whis
 
 <div align="center">
 
-Measured on **Apple M2 Max** with the `base.en` model:
+Measured on **Apple M2 Max** with the `base.en` model using `GGML_NATIVE=OFF ITERATIONS=20 WARMUP=3 ./verify_latency.sh`:
 
-| | Recording | Inference | Total |
+| Sample | Sample duration | Median inference | Mean inference |
 |---|---|---|---|
-| Short phrase | ~2s | `123ms` | **134ms** |
-| Sentence | ~3s | `149ms` | **162ms** |
-| Long paragraph | ~6s | `226ms` | **238ms** |
+| Short phrase | `1.9s` | `~98ms` | `~98ms` |
+| Sentence | `3.2s` | `~116ms` | `~117ms` |
+| Long paragraph | `5.9s` | `~143ms` | `~142ms` |
 
 </div>
+
+> [!NOTE]
+> These are local Whisper inference timings from the benchmark harness, not full key-release-to-paste end-to-end timings.
 
 <br>
 
-### vs. the competition
+### vs. published claims
 
 <div align="center">
 
-| App | Type | Latency | Price | |
-|---|---|---|---|---|
-| **Screamer** | **Local, Metal GPU** | **123–238ms** | **Free & open source** | |
-| Dictato (Parakeet) | Local, streaming | ~80ms | $15 | *Non-Whisper model* |
-| Dictato (Whisper) | Local, streaming | ~120ms | $15 | |
-| Apple Dictation | Local, Neural Engine | ~200ms | Free | *Limited customization* |
-| Voibe | Local, quantized | <300ms | $8 | |
-| SuperWhisper (tiny) | Local, CPU | ~500ms | $10/mo | *Least accurate* |
-| SuperWhisper (base) | Local, CPU | ~500–800ms | $10/mo | *Same model as Screamer* |
-| SuperWhisper (large-v3) | Local, CPU | 1–2s | $10/mo | |
-| Wispr Flow | Cloud | 500–700ms | $10/mo | *Requires internet* |
-| Otter.ai | Cloud | 400–600ms | $17/mo | *Requires internet* |
+| App | Public latency figure | Source |
+|---|---|---|
+| **Screamer** | **~98-143ms median inference (`base.en`, M2 Max)** | Local benchmark: [`./verify_latency.sh`](./verify_latency.sh) |
+| Dictato | `80ms` real-time transcription latency claim | [Dictato](https://dicta.to/) |
+| SuperWhisper | No public `ms` figure found | [Superwhisper](https://superwhisper.com/) |
+| Wispr Flow | No public `ms` figure found | [Wispr Flow](https://wisprflow.ai/), [Microsoft Store](https://apps.microsoft.com/detail/9n1b9jwb3m35) |
+| Otter.ai | No public `ms` figure found | [Otter](https://otter.ai/) |
 
 </div>
 
-> **Screamer is 3–4x faster than SuperWhisper** using the same model size, and faster than every cloud service — while being fully offline and free.
+> As of **March 26, 2026**, Dictato was the only other app above with a public numeric latency claim we could cite. Superwhisper, Wispr Flow, and Otter market speed or real-time transcription, but no public `ms` figures were found to link here, so the old unsourced numbers were removed.
 
 <br>
 
@@ -80,23 +78,23 @@ Screamer uses **whisper.cpp** — the same engine that powers SuperWhisper, MacW
 
 Word Error Rate (WER) on [LibriSpeech test-clean](https://huggingface.co/datasets/librispeech_asr) benchmark:
 
-| Model | WER | Screamer Latency | SuperWhisper Latency | Price |
-|---|---|---|---|---|
-| `tiny.en` | ~7.7% | ~80ms | ~500ms | **Free** vs $10/mo |
-| `base.en` | **~5.0%** | **~134ms** | **~500–800ms** | **Free** vs $10/mo |
-| `small.en` | ~3.4% | ~400ms | ~1–2s | **Free** vs $10/mo |
-| `medium.en` | ~2.9% | ~800ms | ~3–5s | **Free** vs $10/mo |
-| `large-v3` | ~2.5% | ~1.5s | ~5–8s | **Free** vs $10/mo |
+| Model | WER | Tradeoff |
+|---|---|---|
+| `tiny.en` | ~7.7% | Fastest, lowest accuracy |
+| `base.en` | **~5.0%** | **Best default for most people** |
+| `small.en` | ~3.4% | Better for harder vocabulary |
+| `medium.en` | ~2.9% | High accuracy, slower |
+| `large-v3` | ~2.5% | Highest accuracy, slowest |
 
 </div>
 
 > [!TIP]
-> **Same model = same accuracy.** The difference is Screamer runs on your **Metal GPU** for free, while SuperWhisper runs on CPU for $10/mo. You get identical transcription quality at 3–4x the speed, at zero cost.
+> **Same model = same accuracy.** The main difference between apps is packaging and performance, not the underlying Whisper transcription quality.
 
 Pick your tradeoff:
-- **`base.en`** (default) — 5% WER, 134ms latency. Best balance for everyday use.
-- **`small.en`** — 3.4% WER, ~400ms. Noticeably more accurate for complex vocabulary.
-- **`large-v3`** — 2.5% WER, ~1.5s. Maximum accuracy when precision matters.
+- **`base.en`** (default) — 5% WER, with `~100-145ms` measured inference on this Apple M2 Max benchmark. Best balance for everyday use.
+- **`small.en`** — 3.4% WER. Slower, but noticeably more accurate for complex vocabulary.
+- **`large-v3`** — 2.5% WER. Slowest, but best when precision matters.
 
 All models are free to download. Just run `./download_model.sh` and pick one.
 
@@ -190,8 +188,8 @@ Download additional models with `./download_model.sh`.
 | | Screamer | SuperWhisper | Wispr Flow | Otter.ai |
 |---|---|---|---|---|
 | Accuracy (base) | **~5.0% WER** | ~5.0% WER | Proprietary | Proprietary |
-| Latency | **~134ms** | ~500–800ms | ~500–700ms | ~400–600ms |
-| Price | **Free** | $10/mo | $10/mo | $17/mo |
+| Latency evidence | **~98-143ms measured locally** | No public `ms` figure found | No public `ms` figure found | No public `ms` figure found |
+| Price | **Free** | Paid | Paid | Paid |
 | All model sizes | **Yes (tiny → large)** | Yes | N/A | N/A |
 | Offline | **Yes** | Yes | No | No |
 | Open source | **Yes** | No | No | No |

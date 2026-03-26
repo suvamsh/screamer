@@ -1,7 +1,5 @@
 use crate::config::Config;
 use objc2::msg_send;
-use objc2::rc::Retained;
-use objc2_app_kit::NSEvent;
 use objc2_foundation::MainThreadMarker;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,7 +24,7 @@ impl Hotkey {
     /// Reads hotkey config to determine which modifier key to watch.
     pub fn start_on_main_thread(
         &self,
-        mtm: MainThreadMarker,
+        _mtm: MainThreadMarker,
         on_press: impl Fn() + 'static,
         on_release: impl Fn() + 'static,
     ) {

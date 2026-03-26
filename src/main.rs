@@ -9,7 +9,6 @@ mod transcriber;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 use std::fs::OpenOptions;
-use std::io::Write;
 
 fn main() {
     // Redirect stderr to a log file so we can debug when launched via `open`
