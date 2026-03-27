@@ -1,0 +1,167 @@
+name: Release macOS DMG
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    env:
+      CARGO_TERM_COLOR: always
+      GGML_NATIVE: OFF
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Whisper models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: whisper-model-base-en-v1
+
+      - name: Install system dependencies
+        run: brew install cmake
+
+      - name: Download bundled model
+        run: ./download_model.sh base
+
+      - name: Determine release metadata
+        id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            release_tag="$GITHUB_REF_NAME"
+            release_name="Screamer $version"
+            asset_name="Screamer-$version.dmg"
+            alias_name="Screamer.dmg"
+            prerelease="false"
+          else
+            version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+            release_tag="continuous"
+            release_name="Continuous Build"
+            asset_name="Screamer-latest.dmg"
+            alias_name=""
+            prerelease="true"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$asset_name" >> "$GITHUB_OUTPUT"
+          echo "alias_name=$alias_name" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificate
+        if: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_KEYCHAIN_PASSWORD != '' }}
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/developer-id-app.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D > "$CERT_PATH"
+
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/universal/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/screamer \
+            target/x86_64-apple-darwin/release/screamer \
+            -output target/universal/release/screamer
+          lipo -info target/universal/release/screamer
+
+      - name: Bundle signed app
+        env:
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+          BIN_PATH: target/universal/release/screamer
+          SKIP_BUILD: "1"
+          CODESIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: ./bundle.sh
+
+      - name: Create DMG
+        env:
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./create_dmg.sh
+
+      - name: Notarize DMG
+        if: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ./notarize_dmg.sh "dist/Screamer-${{ steps.meta.outputs.version }}.dmg"
+
+      - name: Update continuous tag
+        if: ${{ steps.meta.outputs.release_tag == 'continuous' }}
+        run: |
+          git tag -f continuous "$GITHUB_SHA"
+          git push origin refs/tags/continuous --force
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.meta.outputs.release_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          if [[ "$RELEASE_TAG" == "continuous" ]]; then
+            printf 'Automated DMG build from `main` at commit `%s`.\n' "$GITHUB_SHA" > "$NOTES_FILE"
+          else
+            printf 'Automated DMG release for `%s`.\n' "$RELEASE_TAG" > "$NOTES_FILE"
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            edit_args=("$RELEASE_TAG" --title "$RELEASE_NAME" --notes-file "$NOTES_FILE")
+            if [[ "$PRERELEASE" == "true" ]]; then
+              edit_args+=(--prerelease)
+            fi
+            gh release edit "${edit_args[@]}"
+          else
+            create_args=("$RELEASE_TAG" --target "$GITHUB_SHA" --title "$RELEASE_NAME" --notes-file "$NOTES_FILE")
+            if [[ "$PRERELEASE" == "true" ]]; then
+              create_args+=(--prerelease)
+            fi
+            gh release create "${create_args[@]}"
+          fi
+
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release upload "$RELEASE_TAG" "dist/Screamer-$VERSION.dmg#Screamer-latest.dmg" --clobber
+          else
+            gh release upload "$RELEASE_TAG" "dist/Screamer-$VERSION.dmg" --clobber
+            gh release upload "$RELEASE_TAG" "dist/Screamer-$VERSION.dmg#Screamer.dmg" --clobber
+          fi

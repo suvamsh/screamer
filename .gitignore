@@ -3,6 +3,7 @@
 Screamer.app/
 *.dmg
 dmg_temp/
+dist/
 
 # Models (large binary files — download with ./download_model.sh)
 models/*.bin
