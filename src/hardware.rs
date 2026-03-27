@@ -352,7 +352,10 @@ mod tests {
     #[test]
     fn classifies_intel() {
         assert!(matches!(
-            classify_family("Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz", Architecture::X86_64),
+            classify_family(
+                "Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz",
+                Architecture::X86_64
+            ),
             MachineFamily::Intel
         ));
     }

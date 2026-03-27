@@ -160,16 +160,27 @@ fn load_logo(mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
 }
 
 fn find_logo_path() -> Option<PathBuf> {
-    let bundled = std::env::current_exe().ok().and_then(|exe| {
+    let bundled_base = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()
             .and_then(|p| p.parent())
-            .map(|p| p.join("Resources").join("logo.png"))
+            .map(|p| p.join("Resources"))
     });
 
-    if let Some(path) = bundled.filter(|path| path.exists()) {
-        return Some(path);
+    if let Some(base) = bundled_base {
+        for name in ["image.png", "logo.png"] {
+            let path = base.join(name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
     }
 
-    let local = PathBuf::from("resources").join("logo.png");
-    local.exists().then_some(local)
+    for name in ["image.png", "logo.png"] {
+        let local = PathBuf::from("resources").join(name);
+        if local.exists() {
+            return Some(local);
+        }
+    }
+
+    None
 }

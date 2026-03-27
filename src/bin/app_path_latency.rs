@@ -44,8 +44,8 @@ struct SampleResult {
 
 fn main() -> Result<(), String> {
     let cli = parse_args(env::args().skip(1))?;
-    let model_path =
-        Transcriber::find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+    let model_path = Transcriber::find_model(&cli.model)
+        .ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
     let transcriber = Transcriber::new(&model_path)?;
 
     println!("Screamer app-path latency bench");
@@ -269,7 +269,11 @@ fn print_result(result: &SampleResult, device_rate: u32) {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 struct Stats {

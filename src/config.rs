@@ -42,6 +42,8 @@ pub struct Config {
     pub hotkey: String,
     #[serde(default)]
     pub overlay_position: OverlayPosition,
+    #[serde(default = "default_live_transcription")]
+    pub live_transcription: bool,
 }
 
 impl Default for Config {
@@ -50,8 +52,13 @@ impl Default for Config {
             model: "base".to_string(),
             hotkey: "left_control".to_string(),
             overlay_position: OverlayPosition::default(),
+            live_transcription: default_live_transcription(),
         }
     }
+}
+
+fn default_live_transcription() -> bool {
+    true
 }
 
 pub struct ModelInfo {
@@ -190,6 +197,7 @@ mod tests {
         assert_eq!(config.model, "base");
         assert_eq!(config.hotkey, "left_control");
         assert_eq!(config.overlay_position, OverlayPosition::Center);
+        assert!(config.live_transcription);
     }
 
     #[test]
@@ -198,20 +206,23 @@ mod tests {
             model: "tiny".to_string(),
             hotkey: "fn".to_string(),
             overlay_position: OverlayPosition::Bottom,
+            live_transcription: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.model, "tiny");
         assert_eq!(parsed.hotkey, "fn");
         assert_eq!(parsed.overlay_position, OverlayPosition::Bottom);
+        assert!(!parsed.live_transcription);
     }
 
     #[test]
     fn config_backward_compat() {
-        // Old config without overlay_position should deserialize with default
+        // Old config without overlay_position/live_transcription should deserialize with defaults
         let json = r#"{"model":"base","hotkey":"left_control"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.overlay_position, OverlayPosition::Center);
+        assert!(config.live_transcription);
     }
 
     #[test]

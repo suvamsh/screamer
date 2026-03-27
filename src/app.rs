@@ -17,13 +17,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 const LIVE_TRANSCRIPTION_INTERVAL: Duration = Duration::from_millis(350);
-const LIVE_TRANSCRIPTION_MIN_SAMPLES: usize = 4800;
+const LIVE_TRANSCRIPTION_MIN_SAMPLES: usize = 9600;
 const LIVE_TRANSCRIPTION_MIN_DELTA: usize = 2400;
+const LIVE_TRANSCRIPTION_MAX_SAMPLES: usize = 192_000;
+const LIVE_TRANSCRIPTION_PADDING_SAMPLES: usize = 8000;
+const LIVE_TRANSCRIPT_MAX_CHARS: usize = 180;
 
 // Thread-local overlay reference so menu handlers can update position without relaunch.
 // Safe because all menu handlers and overlay access run on the main thread.
 thread_local! {
     static OVERLAY: RefCell<Option<Rc<RefCell<Overlay>>>> = const { RefCell::new(None) };
+    static LIVE_TRANSCRIPTION_ENABLED: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
 pub struct App {
@@ -32,6 +36,7 @@ pub struct App {
     recorder: Arc<Recorder>,
     transcriber: Arc<Transcriber>,
     is_recording: Arc<AtomicBool>,
+    live_transcription_enabled: Arc<AtomicBool>,
     live_transcript: Arc<Mutex<String>>,
     recording_session: Arc<AtomicU64>,
 }
@@ -61,6 +66,11 @@ fn menu_handler_class() -> &'static AnyClass {
             builder.add_method(
                 sel!(selectPosition:),
                 select_position_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(toggleLiveTranscription:),
+                toggle_live_transcription_action
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -144,6 +154,38 @@ extern "C" fn select_position_action(_this: *mut AnyObject, _sel: Sel, sender: *
     }
 }
 
+extern "C" fn toggle_live_transcription_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    sender: *mut AnyObject,
+) {
+    let enabled = LIVE_TRANSCRIPTION_ENABLED.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(flag) = borrowed.as_ref() else {
+            return None;
+        };
+
+        let enabled = !flag.load(Ordering::Relaxed);
+        flag.store(enabled, Ordering::Relaxed);
+        Some(enabled)
+    });
+
+    let Some(enabled) = enabled else {
+        return;
+    };
+
+    let mut config = Config::load();
+    config.live_transcription = enabled;
+    config.save();
+
+    let state = if enabled { 1isize } else { 0isize };
+    let _: () = unsafe { msg_send![sender, setState: state] };
+    eprintln!(
+        "[screamer] Live transcription {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+}
+
 fn relaunch() {
     eprintln!("[screamer] Relaunching...");
     if let Ok(exe) = std::env::current_exe() {
@@ -218,6 +260,11 @@ impl App {
             *cell.borrow_mut() = Some(overlay.clone());
         });
 
+        let live_transcription_enabled = Arc::new(AtomicBool::new(config.live_transcription));
+        LIVE_TRANSCRIPTION_ENABLED.with(|cell| {
+            *cell.borrow_mut() = Some(live_transcription_enabled.clone());
+        });
+
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(objc2_app_kit::NSSquareStatusItemLength);
 
@@ -244,6 +291,7 @@ impl App {
             recorder,
             transcriber,
             is_recording: Arc::new(AtomicBool::new(false)),
+            live_transcription_enabled,
             live_transcript: Arc::new(Mutex::new(String::new())),
             recording_session: Arc::new(AtomicU64::new(0)),
         })
@@ -346,6 +394,15 @@ impl App {
             pos_item.setSubmenu(Some(&pos_submenu));
             menu.addItem(&pos_item);
 
+            let live_item = NSMenuItem::new(mtm);
+            live_item.setTitle(&NSString::from_str("Live Transcription"));
+            let _: () = msg_send![&*live_item, setTarget: handler];
+            live_item.setAction(Some(sel!(toggleLiveTranscription:)));
+            if config.live_transcription {
+                live_item.setState(1);
+            }
+            menu.addItem(&live_item);
+
             menu.addItem(&NSMenuItem::separatorItem(mtm));
 
             // ── Quit ──
@@ -363,6 +420,7 @@ impl App {
         let recorder = self.recorder.clone();
         let transcriber = self.transcriber.clone();
         let is_recording = self.is_recording.clone();
+        let live_transcription_enabled = self.live_transcription_enabled.clone();
         let live_transcript = self.live_transcript.clone();
         let recording_session = self.recording_session.clone();
 
@@ -372,6 +430,7 @@ impl App {
         let trans_release = transcriber.clone();
         let is_rec_press = is_recording.clone();
         let is_rec_release = is_recording.clone();
+        let live_transcription_enabled_press = live_transcription_enabled.clone();
         let live_transcript_press = live_transcript.clone();
         let live_transcript_release = live_transcript.clone();
         let recording_session_press = recording_session.clone();
@@ -390,14 +449,17 @@ impl App {
                         transcript.clear();
                     }
                     rec_press.start();
-                    spawn_live_transcription_worker(
-                        rec_press.clone(),
-                        trans_press.clone(),
-                        is_rec_press.clone(),
-                        live_transcript_press.clone(),
-                        recording_session_press.clone(),
-                        session,
-                    );
+                    if live_transcription_enabled_press.load(Ordering::Relaxed) {
+                        spawn_live_transcription_worker(
+                            rec_press.clone(),
+                            trans_press.clone(),
+                            is_rec_press.clone(),
+                            live_transcription_enabled_press.clone(),
+                            live_transcript_press.clone(),
+                            recording_session_press.clone(),
+                            session,
+                        );
+                    }
                     eprintln!("[screamer] Recording started");
                 }
             },
@@ -462,6 +524,7 @@ impl App {
         let recorder = self.recorder.clone();
         let overlay = self.overlay.clone();
         let is_recording = self.is_recording.clone();
+        let live_transcription_enabled = self.live_transcription_enabled.clone();
         let live_transcript = self.live_transcript.clone();
 
         unsafe {
@@ -476,10 +539,14 @@ impl App {
                             ov.show();
                         }
                         let waveform = recorder.latest_waveform(WAVEFORM_BINS);
-                        let transcript = live_transcript
-                            .lock()
-                            .map(|text| text.clone())
-                            .unwrap_or_default();
+                        let transcript = if live_transcription_enabled.load(Ordering::Relaxed) {
+                            live_transcript
+                                .lock()
+                                .map(|text| text.clone())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
                         ov.update_waveform(&waveform);
                         ov.update_transcript(&transcript);
                     } else if ov.is_visible() {
@@ -510,6 +577,7 @@ fn spawn_live_transcription_worker(
     recorder: Arc<Recorder>,
     transcriber: Arc<Transcriber>,
     is_recording: Arc<AtomicBool>,
+    live_transcription_enabled: Arc<AtomicBool>,
     live_transcript: Arc<Mutex<String>>,
     recording_session: Arc<AtomicU64>,
     session: u64,
@@ -529,6 +597,13 @@ fn spawn_live_transcription_worker(
                 break;
             }
 
+            if !live_transcription_enabled.load(Ordering::Relaxed) {
+                if let Ok(mut transcript) = live_transcript.lock() {
+                    transcript.clear();
+                }
+                continue;
+            }
+
             let samples = recorder.snapshot();
             if samples.len() < LIVE_TRANSCRIPTION_MIN_SAMPLES {
                 continue;
@@ -539,11 +614,14 @@ fn spawn_live_transcription_worker(
                 continue;
             }
 
-            match transcriber.try_transcribe(&samples) {
+            let padded_samples = padded_live_samples(&samples);
+
+            match transcriber.try_transcribe(&padded_samples) {
                 Ok(Some(text)) => {
                     last_transcribed_samples = samples.len();
+                    let display_text = format_live_transcript(&text);
 
-                    if text.is_empty() || text == last_text {
+                    if display_text.is_empty() || display_text == last_text {
                         continue;
                     }
 
@@ -555,9 +633,10 @@ fn spawn_live_transcription_worker(
 
                     if let Ok(mut transcript) = live_transcript.lock() {
                         transcript.clear();
-                        transcript.push_str(&text);
+                        transcript.push_str(&display_text);
                     }
-                    last_text = text;
+                    eprintln!("[screamer] Live partial: {}", display_text);
+                    last_text = display_text;
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -566,4 +645,64 @@ fn spawn_live_transcription_worker(
             }
         }
     });
+}
+
+fn padded_live_samples(samples: &[f32]) -> Vec<f32> {
+    let samples = live_preview_window(samples);
+    let mut padded = Vec::with_capacity(samples.len() + LIVE_TRANSCRIPTION_PADDING_SAMPLES);
+    padded.extend_from_slice(samples);
+    padded.resize(samples.len() + LIVE_TRANSCRIPTION_PADDING_SAMPLES, 0.0);
+    padded
+}
+
+fn live_preview_window(samples: &[f32]) -> &[f32] {
+    let start = samples.len().saturating_sub(LIVE_TRANSCRIPTION_MAX_SAMPLES);
+    &samples[start..]
+}
+
+fn format_live_transcript(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let total_chars = trimmed.chars().count();
+    if total_chars <= LIVE_TRANSCRIPT_MAX_CHARS {
+        return trimmed.to_string();
+    }
+
+    let tail_start = trimmed
+        .char_indices()
+        .nth(total_chars - LIVE_TRANSCRIPT_MAX_CHARS)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    let tail = trimmed[tail_start..].trim_start();
+    format!("...{}", tail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_preview_window_caps_to_recent_audio() {
+        let samples: Vec<f32> = (0..(LIVE_TRANSCRIPTION_MAX_SAMPLES + 10))
+            .map(|v| v as f32)
+            .collect();
+        let window = live_preview_window(&samples);
+
+        assert_eq!(window.len(), LIVE_TRANSCRIPTION_MAX_SAMPLES);
+        assert_eq!(window[0], 10.0);
+        assert_eq!(window[window.len() - 1], samples[samples.len() - 1]);
+    }
+
+    #[test]
+    fn live_transcript_formatting_keeps_recent_suffix() {
+        let input = "alpha ".repeat(64);
+        let formatted = format_live_transcript(&input);
+
+        assert!(formatted.starts_with("..."));
+        assert!(formatted.ends_with("alpha"));
+        assert!(formatted.chars().count() <= LIVE_TRANSCRIPT_MAX_CHARS + 3);
+    }
 }

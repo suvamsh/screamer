@@ -22,7 +22,7 @@ mkdir -p "$CONTENTS/Resources/models"
 cp target/release/screamer "$CONTENTS/MacOS/Screamer"
 cp resources/Info.plist "$CONTENTS/"
 cp resources/icon.icns "$CONTENTS/Resources/"
-cp resources/logo.png "$CONTENTS/Resources/"
+cp resources/image.png "$CONTENTS/Resources/"
 cp resources/menubarTemplate.png "$CONTENTS/Resources/"
 cp resources/menubarTemplate@2x.png "$CONTENTS/Resources/"
 

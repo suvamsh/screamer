@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="resources/logo.png" width="220" alt="Screamer">
+<img src="resources/image.png" width="220" alt="Screamer">
 
 # Screamer
 
 **The fastest free push-to-talk transcription app.**
 
-Hold a key. Speak. Release. Text appears instantly.
+Hold a key. Speak. Watch live text appear. Release. Text appears instantly.
 
 [![Built with Rust](https://img.shields.io/badge/Built_with-Rust-B7410E?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Metal GPU](https://img.shields.io/badge/Metal-GPU_Accelerated-0071E3?style=for-the-badge&logo=apple&logoColor=white)](#speed)
@@ -26,10 +26,25 @@ Hold a key. Speak. Release. Text appears instantly.
 ## How it works
 
 ```
-Hold Left Control  ──>  Speak  ──>  Release  ──>  Text pasted instantly
+Hold Left Control  ──>  Speak  ──>  See waveform + live text  ──>  Release  ──>  Text pasted instantly
 ```
 
-A frosted-glass waveform overlay tracks your mic input live while you speak, then settles flat when you pause. When you release, whisper.cpp transcribes on your GPU and the text is pasted into whatever app has focus.
+A frosted-glass overlay tracks your mic input live while you speak, keeps the waveform visible, and shows rolling partial transcription from the same loaded Whisper model. When you release, Screamer runs the final full transcription and pastes it into whatever app has focus.
+
+<br>
+
+## Live Overlay Transcription
+
+Live transcription is now part of the overlay, not the paste path:
+
+- **Waveform + text together** while the hotkey is held
+- **Same loaded Whisper model** for both live preview and final transcription
+- **Final paste still happens on release** so we never type unstable partials into the target app
+- **Enabled by default** with a `Live Transcription` toggle in the menu bar
+- **Long dictation stays bounded** by previewing a rolling recent audio window and clipping the overlay to the most recent text
+
+> [!NOTE]
+> The benchmark tables below measure Screamer's release path, not the background live-preview loop. Live preview does add extra work while you hold the key, but the final transcription and paste flow is still the primary latency benchmark.
 
 <br>
 
@@ -60,6 +75,7 @@ Using `target/release/app_path_latency --device-rate 48000 --dispatch-paste` aga
 > [!NOTE]
 > Hardware for these runs: **Apple M2 Max (arm64, 8 performance cores + 4 efficiency cores)**.
 > The inference table measures hot-model, hot-state local Whisper decode time. The app-path table measures Screamer's synchronous release pipeline: stop, resample, transcribe, clipboard write, and `Cmd+V` dispatch.
+> Live overlay transcription is a separate background decode while the key is held, and it uses a rolling recent-audio window to keep long holds responsive.
 
 ### Verification
 
@@ -131,18 +147,20 @@ All models are free to download. Just run `./download_model.sh` and pick one.
 │  Left Ctrl  │────>│  CoreAudio   │────>│  whisper.cpp   │────>│  Cmd+V   │
 │  (hotkey)   │     │  (capture)   │     │  (Metal GPU)   │     │  (paste) │
 └─────────────┘     └──────────────┘     └───────────────┘     └──────────┘
-                           │
-                    ┌──────────────┐
-                    │   Waveform   │
-                    │  (overlay)   │
-                    └──────────────┘
+                           │                     │
+                    ┌──────────────┐      ┌──────────────┐
+                    │   Waveform   │      │ Live Preview │
+                    │  (overlay)   │      │  (overlay)   │
+                    └──────────────┘      └──────────────┘
 ```
 
 - **whisper.cpp** via whisper-rs — model stays loaded in memory, zero cold-start
 - **Machine-aware GPU/CPU tuning** with Metal where available and flash attention on Apple Silicon
 - **CoreAudio** capture at native sample rate, resampled to 16kHz
 - **NSEvent** global monitor for modifier key detection
+- **Live overlay transcription** that previews partial text while you hold the key
 - **Audio-reactive** waveform that mirrors live mic input and goes flat on silence
+- **Rolling live preview window** so long dictation remains stable and responsive
 - **Single binary** — no Electron, no Python, no runtime dependencies
 
 <br>
@@ -191,9 +209,14 @@ Config lives at `~/Library/Application Support/Screamer/config.json`:
 
 ```json
 {
-  "model": "base"
+  "model": "base",
+  "hotkey": "left_control",
+  "overlay_position": "center",
+  "live_transcription": true
 }
 ```
+
+`live_transcription` controls whether the overlay shows live partial text while you hold the hotkey. It defaults to `true` and can also be toggled from the menu bar without editing the file by hand.
 
 | Model | Size | Speed | Accuracy |
 |---|---|---|---|

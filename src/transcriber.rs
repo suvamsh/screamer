@@ -106,8 +106,7 @@ impl Transcriber {
             adaptive_audio_ctx_min: config.adaptive_audio_ctx_min,
         };
 
-        let (ctx, selected_backend) =
-            Self::create_context(model_path, &config, &machine_profile)?;
+        let (ctx, selected_backend) = Self::create_context(model_path, &config, &machine_profile)?;
 
         let (final_state, live_state) = if config.reuse_state {
             let final_state = ctx
@@ -116,10 +115,7 @@ impl Transcriber {
             let live_state = ctx
                 .create_state()
                 .map_err(|e| format!("Failed to create whisper state: {}", e))?;
-            (
-                Some(Mutex::new(final_state)),
-                Some(Mutex::new(live_state)),
-            )
+            (Some(Mutex::new(final_state)), Some(Mutex::new(live_state)))
         } else {
             (None, None)
         };
@@ -217,7 +213,9 @@ impl Transcriber {
     fn acquire_final_state(&self) -> Result<StateAccess<'_>, String> {
         if let Some(state) = &self.final_state {
             Ok(StateAccess::Borrowed(
-                state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
             ))
         } else {
             Ok(StateAccess::Owned(self.create_state()?))
@@ -252,10 +250,9 @@ impl Transcriber {
         let attempts = match config.compute_backend {
             ComputeBackendPreference::CpuOnly => vec![(false, SelectedBackend::Cpu)],
             ComputeBackendPreference::GpuOnly => vec![(true, SelectedBackend::Gpu)],
-            ComputeBackendPreference::PreferGpu => vec![
-                (true, SelectedBackend::Gpu),
-                (false, SelectedBackend::Cpu),
-            ],
+            ComputeBackendPreference::PreferGpu => {
+                vec![(true, SelectedBackend::Gpu), (false, SelectedBackend::Cpu)]
+            }
         };
 
         let model_path = model_path.to_str().ok_or("Invalid model path")?;
@@ -341,7 +338,7 @@ impl Transcriber {
             required.max(self.config.adaptive_audio_ctx_min),
             AUDIO_CTX_GRANULARITY,
         )
-            .min(self.ctx.n_audio_ctx())
+        .min(self.ctx.n_audio_ctx())
     }
 }
 
@@ -354,5 +351,9 @@ fn round_up_to_multiple(value: i32, multiple: i32) -> i32 {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }

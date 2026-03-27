@@ -31,8 +31,8 @@ struct SampleResult {
 
 fn main() -> Result<(), String> {
     let cli = parse_args(env::args().skip(1))?;
-    let model_path =
-        Transcriber::find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+    let model_path = Transcriber::find_model(&cli.model)
+        .ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
 
     let config = TranscriberConfig {
         audio_ctx: AudioContextStrategy::Adaptive,

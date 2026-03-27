@@ -30,7 +30,8 @@ struct SampleResult {
 
 fn main() -> Result<(), String> {
     let cli = parse_args(env::args().skip(1))?;
-    let model_path = find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+    let model_path =
+        find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
     let machine = MachineProfile::detect();
     let tuning = machine.recommended_tuning();
     let (ctx, backend_name) = create_context(&model_path, &machine, &tuning)?;
@@ -133,7 +134,9 @@ where
 }
 
 fn print_usage() {
-    eprintln!("Usage: cargo run --release --bin latency_direct_whisper -- [options] <audio.f32>...");
+    eprintln!(
+        "Usage: cargo run --release --bin latency_direct_whisper -- [options] <audio.f32>..."
+    );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <name>         Whisper model to use (default: base)");
@@ -160,7 +163,11 @@ fn transcribe_once(
     params.set_suppress_blank(true);
     params.set_no_context(true);
     params.set_single_segment(true);
-    params.set_audio_ctx(recommended_audio_ctx(ctx, tuning.adaptive_audio_ctx_min, samples));
+    params.set_audio_ctx(recommended_audio_ctx(
+        ctx,
+        tuning.adaptive_audio_ctx_min,
+        samples,
+    ));
 
     let t0 = Instant::now();
     state
@@ -217,9 +224,14 @@ fn create_context(
     Err(last_error.unwrap_or_else(|| "Failed to load whisper model".to_string()))
 }
 
-fn recommended_audio_ctx(ctx: &WhisperContext, adaptive_audio_ctx_min: i32, samples: &[f32]) -> i32 {
+fn recommended_audio_ctx(
+    ctx: &WhisperContext,
+    adaptive_audio_ctx_min: i32,
+    samples: &[f32],
+) -> i32 {
     let required = samples.len().div_ceil(AUDIO_CTX_SAMPLES_PER_UNIT) as i32;
-    round_up_to_multiple(required.max(adaptive_audio_ctx_min), AUDIO_CTX_GRANULARITY).min(ctx.n_audio_ctx())
+    round_up_to_multiple(required.max(adaptive_audio_ctx_min), AUDIO_CTX_GRANULARITY)
+        .min(ctx.n_audio_ctx())
 }
 
 fn round_up_to_multiple(value: i32, multiple: i32) -> i32 {
@@ -299,7 +311,11 @@ fn print_result(result: &SampleResult) {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 struct Stats {

@@ -36,8 +36,8 @@ struct SampleResult {
 
 fn main() -> Result<(), String> {
     let cli = parse_args(env::args().skip(1))?;
-    let model_path =
-        Transcriber::find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+    let model_path = Transcriber::find_model(&cli.model)
+        .ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
 
     let mut config = TranscriberConfig::default();
     config.reuse_state = cli.reuse_state;
@@ -272,7 +272,11 @@ fn duration_ms(duration: std::time::Duration) -> f64 {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn audio_ctx_label(audio_ctx: AudioContextStrategy) -> String {
