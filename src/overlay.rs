@@ -2,31 +2,37 @@ use crate::config::OverlayPosition;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSScreen, NSView, NSVisualEffectMaterial,
-    NSVisualEffectView, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSLineBreakMode, NSPanel, NSScreen, NSTextAlignment, NSTextField,
+    NSView, NSVisualEffectMaterial, NSVisualEffectView, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_foundation::MainThreadMarker;
+use objc2_foundation::{MainThreadMarker, NSString};
 
 pub const WAVEFORM_BINS: usize = 64;
 
-const WINDOW_WIDTH: f64 = 340.0;
-const WINDOW_HEIGHT: f64 = 80.0;
+const WINDOW_WIDTH: f64 = 380.0;
+const WINDOW_HEIGHT: f64 = 124.0;
 const NUM_BARS: usize = WAVEFORM_BINS;
 const BAR_WIDTH: f64 = 2.3;
 const BAR_SPACING: f64 = 2.6;
 const BAR_MIN_HEIGHT: f64 = 2.0;
 const CORNER_RADIUS: f64 = 18.0;
-const PADDING_X: f64 = 14.0;
-const PADDING_Y: f64 = 9.0;
-const BAR_MAX_HEIGHT: f64 = WINDOW_HEIGHT - PADDING_Y * 2.0;
+const PADDING_X: f64 = 16.0;
+const PADDING_Y: f64 = 12.0;
+const SECTION_SPACING: f64 = 8.0;
+const TRANSCRIPT_HEIGHT: f64 = 36.0;
+const WAVEFORM_HEIGHT: f64 =
+    WINDOW_HEIGHT - (PADDING_Y * 2.0) - TRANSCRIPT_HEIGHT - SECTION_SPACING;
+const BAR_MAX_HEIGHT: f64 = WAVEFORM_HEIGHT;
 
 const POSITION_MARGIN: f64 = 40.0;
 
 pub struct Overlay {
     panel: Retained<NSPanel>,
     bar_views: Vec<Retained<NSView>>,
+    transcript_label: Retained<NSTextField>,
     current_heights: [f64; NUM_BARS],
+    current_transcript: String,
     visible: bool,
     position: OverlayPosition,
 }
@@ -97,12 +103,29 @@ impl Overlay {
         let total_bars_width = NUM_BARS as f64 * BAR_WIDTH + (NUM_BARS - 1) as f64 * BAR_SPACING;
         let bars_x_offset = PADDING_X + (usable_width - total_bars_width) / 2.0;
 
+        let transcript_label = {
+            let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            label.setFrame(Self::transcript_frame(position));
+            label.setDrawsBackground(false);
+            label.setBordered(false);
+            label.setBezeled(false);
+            label.setEditable(false);
+            label.setSelectable(false);
+            label.setAlignment(NSTextAlignment(2));
+            label.setMaximumNumberOfLines(2);
+            label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+            label.setTextColor(Some(&NSColor::colorWithCalibratedWhite_alpha(1.0, 0.90)));
+            label.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(12.5)));
+            label
+        };
+
         let mut bar_views = Vec::with_capacity(NUM_BARS);
         for i in 0..NUM_BARS {
             let x = bars_x_offset + i as f64 * (BAR_WIDTH + BAR_SPACING);
             let bar = {
                 let view = NSView::new(mtm);
-                let y = (WINDOW_HEIGHT - BAR_MIN_HEIGHT) / 2.0;
+                let waveform_origin_y = Self::waveform_origin_y(position);
+                let y = waveform_origin_y + (WAVEFORM_HEIGHT - BAR_MIN_HEIGHT) / 2.0;
                 view.setFrame(CGRect::new(
                     CGPoint::new(x, y),
                     CGSize::new(BAR_WIDTH, BAR_MIN_HEIGHT),
@@ -131,6 +154,7 @@ impl Overlay {
         {
             let content_view = panel.contentView().unwrap();
             content_view.addSubview(&effect_view);
+            effect_view.addSubview(&transcript_label);
             for bar in &bar_views {
                 effect_view.addSubview(bar);
             }
@@ -139,7 +163,9 @@ impl Overlay {
         let s = Self {
             panel,
             bar_views,
+            transcript_label,
             current_heights: [BAR_MIN_HEIGHT; NUM_BARS],
+            current_transcript: String::new(),
             visible: false,
             position,
         };
@@ -157,6 +183,9 @@ impl Overlay {
     pub fn hide(&mut self) {
         self.visible = false;
         self.current_heights = [BAR_MIN_HEIGHT; NUM_BARS];
+        self.current_transcript.clear();
+        self.transcript_label
+            .setStringValue(&NSString::from_str(""));
         self.panel.setAlphaValue(0.0);
         self.panel.orderOut(None);
     }
@@ -172,7 +201,7 @@ impl Overlay {
             self.current_heights[bar_idx] = smooth_height(self.current_heights[bar_idx], target);
 
             let h = self.current_heights[bar_idx];
-            let y = (WINDOW_HEIGHT - h) / 2.0;
+            let y = Self::waveform_origin_y(self.position) + (WAVEFORM_HEIGHT - h) / 2.0;
 
             let mut frame: CGRect = self.bar_views[bar_idx].frame();
             frame.origin.y = y as CGFloat;
@@ -181,12 +210,24 @@ impl Overlay {
         }
     }
 
+    pub fn update_transcript(&mut self, transcript: &str) {
+        if !self.visible || self.current_transcript == transcript {
+            return;
+        }
+
+        self.current_transcript.clear();
+        self.current_transcript.push_str(transcript);
+        self.transcript_label
+            .setStringValue(&NSString::from_str(transcript));
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }
 
     pub fn set_position(&mut self, mtm: MainThreadMarker, position: OverlayPosition) {
         self.position = position;
+        self.layout_content();
         self.apply_position(mtm);
     }
 
@@ -201,6 +242,50 @@ impl Overlay {
             };
             self.panel.setFrameOrigin(CGPoint::new(x, y));
         }
+    }
+
+    fn layout_content(&mut self) {
+        self.transcript_label
+            .setFrame(Self::transcript_frame(self.position));
+
+        let waveform_origin_y = Self::waveform_origin_y(self.position);
+        for (index, bar) in self.bar_views.iter().enumerate() {
+            let x = Self::bars_x_offset() + index as f64 * (BAR_WIDTH + BAR_SPACING);
+            let h = self.current_heights[index];
+            let y = waveform_origin_y + (WAVEFORM_HEIGHT - h) / 2.0;
+            bar.setFrame(CGRect::new(CGPoint::new(x, y), CGSize::new(BAR_WIDTH, h)));
+        }
+    }
+
+    fn bars_x_offset() -> f64 {
+        let usable_width = WINDOW_WIDTH - PADDING_X * 2.0;
+        let total_bars_width = NUM_BARS as f64 * BAR_WIDTH + (NUM_BARS - 1) as f64 * BAR_SPACING;
+        PADDING_X + (usable_width - total_bars_width) / 2.0
+    }
+
+    fn transcript_frame(position: OverlayPosition) -> CGRect {
+        let y = if Self::transcript_above_waveform(position) {
+            WINDOW_HEIGHT - PADDING_Y - TRANSCRIPT_HEIGHT
+        } else {
+            PADDING_Y
+        };
+
+        CGRect::new(
+            CGPoint::new(PADDING_X, y),
+            CGSize::new(WINDOW_WIDTH - PADDING_X * 2.0, TRANSCRIPT_HEIGHT),
+        )
+    }
+
+    fn waveform_origin_y(position: OverlayPosition) -> f64 {
+        if Self::transcript_above_waveform(position) {
+            PADDING_Y
+        } else {
+            PADDING_Y + TRANSCRIPT_HEIGHT + SECTION_SPACING
+        }
+    }
+
+    fn transcript_above_waveform(position: OverlayPosition) -> bool {
+        !matches!(position, OverlayPosition::Top)
     }
 }
 

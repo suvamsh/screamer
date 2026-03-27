@@ -139,6 +139,22 @@ impl Recorder {
         }
     }
 
+    pub fn snapshot(&self) -> Vec<f32> {
+        let device_rate = self.device_sample_rate.load(Ordering::Relaxed);
+
+        let raw_samples = if let Ok(samples) = self.samples.lock() {
+            samples.clone()
+        } else {
+            return Vec::new();
+        };
+
+        if device_rate == TARGET_SAMPLE_RATE {
+            raw_samples
+        } else {
+            resample(&raw_samples, device_rate, TARGET_SAMPLE_RATE)
+        }
+    }
+
     pub fn latest_waveform(&self, bins: usize) -> Vec<f32> {
         if bins == 0 {
             return Vec::new();

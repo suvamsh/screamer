@@ -7,6 +7,11 @@ ITERATIONS="${ITERATIONS:-15}"
 WARMUP="${WARMUP:-2}"
 MODEL="${MODEL:-base}"
 WHISPER_LOG="${WHISPER_LOG:-/tmp/screamer-latency-whisper.log}"
+THREADS="${THREADS:-}"
+FRESH_STATE="${FRESH_STATE:-0}"
+TIMESTAMPS="${TIMESTAMPS:-0}"
+AUDIO_CTX="${AUDIO_CTX:-}"
+FULL_AUDIO_CTX="${FULL_AUDIO_CTX:-0}"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -45,6 +50,20 @@ echo "  machine: $(sysctl -n machdep.cpu.brand_string)"
 echo "  model: $MODEL"
 echo "  temp dir: $TMP_DIR"
 echo "  whisper log: $WHISPER_LOG"
+if [[ -n "$THREADS" ]]; then
+  echo "  threads override: $THREADS"
+fi
+if [[ "$FRESH_STATE" == "1" ]]; then
+  echo "  fresh state: yes"
+fi
+if [[ "$TIMESTAMPS" == "1" ]]; then
+  echo "  generate timestamps: yes"
+fi
+if [[ -n "$AUDIO_CTX" ]]; then
+  echo "  audio ctx override: $AUDIO_CTX"
+elif [[ "$FULL_AUDIO_CTX" == "1" ]]; then
+  echo "  audio ctx: default"
+fi
 echo
 echo "Synthesizing benchmark audio:"
 synthesize "short_phrase" "Schedule lunch with Maya tomorrow."
@@ -52,13 +71,41 @@ synthesize "sentence" "I shipped the recorder fix this morning, and it looks sta
 synthesize "long_paragraph" "I shipped the recorder fix this morning, and I want to test the release build again before we publish the update."
 echo
 
+BENCH_ARGS=()
+if [[ -n "$THREADS" ]]; then
+  BENCH_ARGS+=(--threads "$THREADS")
+fi
+if [[ "$FRESH_STATE" == "1" ]]; then
+  BENCH_ARGS+=(--fresh-state)
+fi
+if [[ "$TIMESTAMPS" == "1" ]]; then
+  BENCH_ARGS+=(--timestamps)
+fi
+if [[ "$FULL_AUDIO_CTX" == "1" ]]; then
+  BENCH_ARGS+=(--full-audio-ctx)
+elif [[ -n "$AUDIO_CTX" ]]; then
+  BENCH_ARGS+=(--audio-ctx "$AUDIO_CTX")
+fi
+
 cd "$ROOT"
 cargo build --release --bin latency_bench
-target/release/latency_bench \
-  --model "$MODEL" \
-  --warmup "$WARMUP" \
-  --iterations "$ITERATIONS" \
-  "$TMP_DIR/short_phrase.f32" \
-  "$TMP_DIR/sentence.f32" \
-  "$TMP_DIR/long_paragraph.f32" \
-  2>"$WHISPER_LOG"
+if (( ${#BENCH_ARGS[@]} > 0 )); then
+  target/release/latency_bench \
+    --model "$MODEL" \
+    --warmup "$WARMUP" \
+    --iterations "$ITERATIONS" \
+    "${BENCH_ARGS[@]}" \
+    "$TMP_DIR/short_phrase.f32" \
+    "$TMP_DIR/sentence.f32" \
+    "$TMP_DIR/long_paragraph.f32" \
+    2>"$WHISPER_LOG"
+else
+  target/release/latency_bench \
+    --model "$MODEL" \
+    --warmup "$WARMUP" \
+    --iterations "$ITERATIONS" \
+    "$TMP_DIR/short_phrase.f32" \
+    "$TMP_DIR/sentence.f32" \
+    "$TMP_DIR/long_paragraph.f32" \
+    2>"$WHISPER_LOG"
+fi

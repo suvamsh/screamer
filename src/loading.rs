@@ -44,7 +44,9 @@ impl LoadingWindow {
         );
         panel.center();
 
-        let content_view = panel.contentView().expect("loading panel should have content view");
+        let content_view = panel
+            .contentView()
+            .expect("loading panel should have content view");
         content_view.setWantsLayer(true);
         if let Some(layer) = content_view.layer() {
             layer.setCornerRadius(22.0 as CGFloat);

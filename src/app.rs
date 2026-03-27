@@ -12,8 +12,13 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSString};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+const LIVE_TRANSCRIPTION_INTERVAL: Duration = Duration::from_millis(350);
+const LIVE_TRANSCRIPTION_MIN_SAMPLES: usize = 4800;
+const LIVE_TRANSCRIPTION_MIN_DELTA: usize = 2400;
 
 // Thread-local overlay reference so menu handlers can update position without relaunch.
 // Safe because all menu handlers and overlay access run on the main thread.
@@ -27,6 +32,8 @@ pub struct App {
     recorder: Arc<Recorder>,
     transcriber: Arc<Transcriber>,
     is_recording: Arc<AtomicBool>,
+    live_transcript: Arc<Mutex<String>>,
+    recording_session: Arc<AtomicU64>,
 }
 
 pub struct AppInitError {
@@ -236,6 +243,8 @@ impl App {
             recorder,
             transcriber,
             is_recording: Arc::new(AtomicBool::new(false)),
+            live_transcript: Arc::new(Mutex::new(String::new())),
+            recording_session: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -353,12 +362,18 @@ impl App {
         let recorder = self.recorder.clone();
         let transcriber = self.transcriber.clone();
         let is_recording = self.is_recording.clone();
+        let live_transcript = self.live_transcript.clone();
+        let recording_session = self.recording_session.clone();
 
         let rec_press = recorder.clone();
         let rec_release = recorder.clone();
-        let trans = transcriber.clone();
+        let trans_press = transcriber.clone();
+        let trans_release = transcriber.clone();
         let is_rec_press = is_recording.clone();
         let is_rec_release = is_recording.clone();
+        let live_transcript_press = live_transcript.clone();
+        let live_transcript_release = live_transcript.clone();
+        let recording_session_press = recording_session.clone();
 
         let hotkey = crate::hotkey::Hotkey::new();
 
@@ -369,7 +384,19 @@ impl App {
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
+                    let session = recording_session_press.fetch_add(1, Ordering::SeqCst) + 1;
+                    if let Ok(mut transcript) = live_transcript_press.lock() {
+                        transcript.clear();
+                    }
                     rec_press.start();
+                    spawn_live_transcription_worker(
+                        rec_press.clone(),
+                        trans_press.clone(),
+                        is_rec_press.clone(),
+                        live_transcript_press.clone(),
+                        recording_session_press.clone(),
+                        session,
+                    );
                     eprintln!("[screamer] Recording started");
                 }
             },
@@ -378,7 +405,11 @@ impl App {
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
+                    let release_t0 = std::time::Instant::now();
                     let samples = rec_release.stop();
+                    if let Ok(mut transcript) = live_transcript_release.lock() {
+                        transcript.clear();
+                    }
                     eprintln!("[screamer] Recording stopped, {} samples", samples.len());
 
                     if samples.len() < 4800 {
@@ -386,17 +417,29 @@ impl App {
                         return;
                     }
 
-                    let t = trans.clone();
+                    let t = trans_release.clone();
+                    let stop_ms = release_t0.elapsed().as_millis();
                     std::thread::spawn(move || {
-                        let t0 = std::time::Instant::now();
-                        match t.transcribe(&samples) {
-                            Ok(text) if !text.is_empty() => {
-                                let inference_ms = t0.elapsed().as_millis();
-                                eprintln!("[screamer] Transcribed in {}ms: {}", inference_ms, text);
-                                crate::paster::paste(&text);
+                        match t.transcribe_profiled(&samples) {
+                            Ok(result) if !result.text.is_empty() => {
                                 eprintln!(
-                                    "[screamer] Total latency: {}ms",
-                                    t0.elapsed().as_millis()
+                                    "[screamer] Transcribed in {}ms: {}",
+                                    result.profile.total.as_millis(),
+                                    result.text
+                                );
+
+                                let paste_t0 = std::time::Instant::now();
+                                crate::paster::paste(&result.text);
+                                let paste_ms = paste_t0.elapsed().as_millis();
+
+                                eprintln!(
+                                    "[screamer] Latency breakdown: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
+                                    stop_ms,
+                                    result.profile.state_acquire.as_millis(),
+                                    result.profile.inference.as_millis(),
+                                    result.profile.extract.as_millis(),
+                                    paste_ms,
+                                    release_t0.elapsed().as_millis()
                                 );
                             }
                             Ok(_) => {
@@ -418,6 +461,7 @@ impl App {
         let recorder = self.recorder.clone();
         let overlay = self.overlay.clone();
         let is_recording = self.is_recording.clone();
+        let live_transcript = self.live_transcript.clone();
 
         unsafe {
             use objc2::ClassType;
@@ -431,7 +475,12 @@ impl App {
                             ov.show();
                         }
                         let waveform = recorder.latest_waveform(WAVEFORM_BINS);
+                        let transcript = live_transcript
+                            .lock()
+                            .map(|text| text.clone())
+                            .unwrap_or_default();
                         ov.update_waveform(&waveform);
+                        ov.update_transcript(&transcript);
                     } else if ov.is_visible() {
                         ov.hide();
                     }
@@ -454,4 +503,66 @@ impl App {
         alert.setInformativeText(&NSString::from_str(message));
         alert.runModal();
     }
+}
+
+fn spawn_live_transcription_worker(
+    recorder: Arc<Recorder>,
+    transcriber: Arc<Transcriber>,
+    is_recording: Arc<AtomicBool>,
+    live_transcript: Arc<Mutex<String>>,
+    recording_session: Arc<AtomicU64>,
+    session: u64,
+) {
+    std::thread::spawn(move || {
+        let mut last_transcribed_samples = 0usize;
+        let mut last_text = String::new();
+
+        while is_recording.load(Ordering::Relaxed)
+            && recording_session.load(Ordering::Relaxed) == session
+        {
+            std::thread::sleep(LIVE_TRANSCRIPTION_INTERVAL);
+
+            if !is_recording.load(Ordering::Relaxed)
+                || recording_session.load(Ordering::Relaxed) != session
+            {
+                break;
+            }
+
+            let samples = recorder.snapshot();
+            if samples.len() < LIVE_TRANSCRIPTION_MIN_SAMPLES {
+                continue;
+            }
+
+            if samples.len().saturating_sub(last_transcribed_samples) < LIVE_TRANSCRIPTION_MIN_DELTA
+            {
+                continue;
+            }
+
+            match transcriber.try_transcribe(&samples) {
+                Ok(Some(text)) => {
+                    last_transcribed_samples = samples.len();
+
+                    if text.is_empty() || text == last_text {
+                        continue;
+                    }
+
+                    if !is_recording.load(Ordering::Relaxed)
+                        || recording_session.load(Ordering::Relaxed) != session
+                    {
+                        break;
+                    }
+
+                    if let Ok(mut transcript) = live_transcript.lock() {
+                        transcript.clear();
+                        transcript.push_str(&text);
+                    }
+                    last_text = text;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("[screamer] Live transcription error: {}", err);
+                }
+            }
+        }
+    });
 }

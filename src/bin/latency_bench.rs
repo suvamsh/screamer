@@ -1,8 +1,11 @@
+#[allow(dead_code)]
+#[path = "../transcriber.rs"]
+mod transcriber;
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use transcriber::{AudioContextStrategy, Transcriber, TranscriberConfig};
 
 const SAMPLE_RATE: f64 = 16_000.0;
 
@@ -10,6 +13,10 @@ struct Cli {
     model: String,
     iterations: usize,
     warmup: usize,
+    threads: Option<i32>,
+    reuse_state: bool,
+    no_timestamps: bool,
+    audio_ctx: AudioContextStrategy,
     inputs: Vec<PathBuf>,
 }
 
@@ -17,48 +24,71 @@ struct SampleResult {
     path: PathBuf,
     samples: usize,
     transcript: String,
-    warmup_ms: Vec<f64>,
-    run_ms: Vec<f64>,
+    warmup_total_ms: Vec<f64>,
+    run_total_ms: Vec<f64>,
+    run_state_ms: Vec<f64>,
+    run_inference_ms: Vec<f64>,
+    run_extract_ms: Vec<f64>,
 }
 
 fn main() -> Result<(), String> {
     let cli = parse_args(env::args().skip(1))?;
     let model_path =
-        find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+        Transcriber::find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+
+    let mut config = TranscriberConfig::default();
+    config.reuse_state = cli.reuse_state;
+    config.no_timestamps = cli.no_timestamps;
+    config.audio_ctx = cli.audio_ctx;
+    if let Some(threads) = cli.threads {
+        config.n_threads = threads;
+    }
 
     println!("Screamer latency bench");
     println!("  model: {}", model_path.display());
     println!("  warmup runs: {}", cli.warmup);
     println!("  measured runs: {}", cli.iterations);
+    println!("  threads: {}", config.n_threads);
+    println!("  reuse state: {}", yes_no(config.reuse_state));
+    println!("  generate timestamps: {}", yes_no(!config.no_timestamps));
+    println!("  audio ctx: {}", audio_ctx_label(config.audio_ctx));
     println!();
 
-    let transcriber = Transcriber::new(&model_path)?;
+    let transcriber = Transcriber::with_config(&model_path, config)?;
 
     let mut results = Vec::new();
     for input in &cli.inputs {
         let audio = read_f32le_file(input)?;
         let transcript = transcriber.transcribe(&audio)?;
 
-        let mut warmup_ms = Vec::with_capacity(cli.warmup);
+        let mut warmup_total_ms = Vec::with_capacity(cli.warmup);
         for _ in 0..cli.warmup {
-            let t0 = Instant::now();
-            let _ = transcriber.transcribe(&audio)?;
-            warmup_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            let run = transcriber.transcribe_profiled(&audio)?;
+            warmup_total_ms.push(duration_ms(run.profile.total));
         }
 
-        let mut run_ms = Vec::with_capacity(cli.iterations);
+        let mut run_total_ms = Vec::with_capacity(cli.iterations);
+        let mut run_state_ms = Vec::with_capacity(cli.iterations);
+        let mut run_inference_ms = Vec::with_capacity(cli.iterations);
+        let mut run_extract_ms = Vec::with_capacity(cli.iterations);
+
         for _ in 0..cli.iterations {
-            let t0 = Instant::now();
-            let _ = transcriber.transcribe(&audio)?;
-            run_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            let run = transcriber.transcribe_profiled(&audio)?;
+            run_total_ms.push(duration_ms(run.profile.total));
+            run_state_ms.push(duration_ms(run.profile.state_acquire));
+            run_inference_ms.push(duration_ms(run.profile.inference));
+            run_extract_ms.push(duration_ms(run.profile.extract));
         }
 
         results.push(SampleResult {
             path: input.clone(),
             samples: audio.len(),
             transcript,
-            warmup_ms,
-            run_ms,
+            warmup_total_ms,
+            run_total_ms,
+            run_state_ms,
+            run_inference_ms,
+            run_extract_ms,
         });
     }
 
@@ -76,6 +106,10 @@ where
     let mut model = String::from("base");
     let mut iterations = 15usize;
     let mut warmup = 2usize;
+    let mut threads = None;
+    let mut reuse_state = true;
+    let mut no_timestamps = true;
+    let mut audio_ctx = AudioContextStrategy::Adaptive;
     let mut inputs = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -98,6 +132,35 @@ where
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid --warmup value: {}", value))?;
             }
+            "--threads" => {
+                let value = args.next().ok_or("--threads requires a value")?;
+                let parsed = value
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --threads value: {}", value))?;
+                if parsed <= 0 {
+                    return Err("--threads must be greater than 0".to_string());
+                }
+                threads = Some(parsed);
+            }
+            "--fresh-state" => {
+                reuse_state = false;
+            }
+            "--timestamps" => {
+                no_timestamps = false;
+            }
+            "--full-audio-ctx" => {
+                audio_ctx = AudioContextStrategy::ModelDefault;
+            }
+            "--audio-ctx" => {
+                let value = args.next().ok_or("--audio-ctx requires a value")?;
+                let parsed = value
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid --audio-ctx value: {}", value))?;
+                if parsed <= 0 {
+                    return Err("--audio-ctx must be greater than 0".to_string());
+                }
+                audio_ctx = AudioContextStrategy::Fixed(parsed);
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -117,6 +180,10 @@ where
         model,
         iterations,
         warmup,
+        threads,
+        reuse_state,
+        no_timestamps,
+        audio_ctx,
         inputs,
     })
 }
@@ -128,6 +195,11 @@ fn print_usage() {
     eprintln!("  --model <name>         Whisper model to use (default: base)");
     eprintln!("  --iterations <count>   Measured runs per sample (default: 15)");
     eprintln!("  --warmup <count>       Warmup runs per sample (default: 2)");
+    eprintln!("  --threads <count>      Decoder threads to use");
+    eprintln!("  --fresh-state          Recreate Whisper state every run");
+    eprintln!("  --timestamps           Generate timestamps during decode");
+    eprintln!("  --full-audio-ctx       Use the model's default audio context");
+    eprintln!("  --audio-ctx <count>    Override whisper audio context");
     eprintln!();
     eprintln!("Input format:");
     eprintln!("  Files must be raw f32 little-endian mono audio at 16kHz.");
@@ -154,8 +226,11 @@ fn read_f32le_file(path: &Path) -> Result<Vec<f32>, String> {
 
 fn print_result(result: &SampleResult) {
     let duration_s = result.samples as f64 / SAMPLE_RATE;
-    let stats = Stats::from_samples(&result.run_ms);
-    let warmup_stats = Stats::from_samples(&result.warmup_ms);
+    let stats = Stats::from_samples(&result.run_total_ms);
+    let warmup_stats = Stats::from_samples(&result.warmup_total_ms);
+    let state_stats = Stats::from_samples(&result.run_state_ms);
+    let inference_stats = Stats::from_samples(&result.run_inference_ms);
+    let extract_stats = Stats::from_samples(&result.run_extract_ms);
     let label = result
         .path
         .file_stem()
@@ -170,18 +245,38 @@ fn print_result(result: &SampleResult) {
     );
     println!("  transcript: {}", result.transcript);
 
-    if !result.warmup_ms.is_empty() {
+    if !result.warmup_total_ms.is_empty() {
         println!(
-            "  warmup: min {:.1} ms | p50 {:.1} ms | max {:.1} ms",
+            "  warmup total: min {:.1} ms | p50 {:.1} ms | max {:.1} ms",
             warmup_stats.min, warmup_stats.p50, warmup_stats.max
         );
     }
 
     println!(
-        "  measured: min {:.1} ms | p50 {:.1} ms | p95 {:.1} ms | max {:.1} ms | mean {:.1} ms",
+        "  measured total: min {:.1} ms | p50 {:.1} ms | p95 {:.1} ms | max {:.1} ms | mean {:.1} ms",
         stats.min, stats.p50, stats.p95, stats.max, stats.mean
     );
+    println!(
+        "  stage mean: state {:.1} ms | infer {:.1} ms | extract {:.1} ms",
+        state_stats.mean, inference_stats.mean, extract_stats.mean
+    );
     println!();
+}
+
+fn duration_ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn audio_ctx_label(audio_ctx: AudioContextStrategy) -> String {
+    match audio_ctx {
+        AudioContextStrategy::Adaptive => "adaptive".to_string(),
+        AudioContextStrategy::Fixed(value) => value.to_string(),
+        AudioContextStrategy::ModelDefault => "default".to_string(),
+    }
 }
 
 struct Stats {
@@ -222,79 +317,4 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
     let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
     sorted[idx]
-}
-
-struct Transcriber {
-    ctx: WhisperContext,
-    n_threads: i32,
-}
-
-impl Transcriber {
-    fn new(model_path: &Path) -> Result<Self, String> {
-        let mut params = WhisperContextParameters::default();
-        params.flash_attn(true);
-
-        let ctx = WhisperContext::new_with_params(
-            model_path.to_str().ok_or("Invalid model path")?,
-            params,
-        )
-        .map_err(|e| format!("Failed to load whisper model: {}", e))?;
-
-        let n_threads = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(4);
-
-        Ok(Self { ctx, n_threads })
-    }
-
-    fn transcribe(&self, samples: &[f32]) -> Result<String, String> {
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_n_threads(self.n_threads);
-        params.set_language(Some("en"));
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_blank(true);
-        params.set_no_context(true);
-        params.set_single_segment(true);
-
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| format!("Failed to create whisper state: {}", e))?;
-
-        state
-            .full(params, samples)
-            .map_err(|e| format!("Transcription failed: {}", e))?;
-
-        let segments = state
-            .full_n_segments()
-            .map_err(|e| format!("Failed to get segments: {}", e))?;
-
-        let mut text = String::with_capacity(256);
-        for i in 0..segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
-            }
-        }
-
-        Ok(text.trim().to_string())
-    }
-}
-
-fn find_model(model_name: &str) -> Option<PathBuf> {
-    let candidates = [
-        format!("ggml-{}.en.bin", model_name),
-        format!("ggml-{}.bin", model_name),
-        format!("ggml-{}-v3.bin", model_name),
-    ];
-
-    for filename in candidates {
-        let path = PathBuf::from("models").join(filename);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    None
 }
