@@ -212,11 +212,13 @@ Config lives at `~/Library/Application Support/Screamer/config.json`:
   "model": "base",
   "hotkey": "left_control",
   "overlay_position": "center",
-  "live_transcription": true
+  "live_transcription": true,
+  "sound_effects": true
 }
 ```
 
 `live_transcription` controls whether the overlay shows live partial text while you hold the hotkey. It defaults to `true` and can also be toggled from the menu bar without editing the file by hand.
+`sound_effects` controls the start/finish cue sounds. It defaults to `true` and can also be toggled from the menu bar.
 
 | Model | Size | Speed | Accuracy |
 |---|---|---|---|

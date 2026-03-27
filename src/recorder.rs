@@ -29,14 +29,17 @@ impl Recorder {
         }
     }
 
-    pub fn start(&self) {
-        // Clear buffers
+    pub fn reset_buffers(&self) {
         if let Ok(mut s) = self.samples.lock() {
             s.clear();
         }
         if let Ok(mut waveform) = self.waveform_samples.lock() {
             waveform.clear();
         }
+    }
+
+    pub fn start(&self) {
+        self.reset_buffers();
 
         let host = cpal::default_host();
         let device = host

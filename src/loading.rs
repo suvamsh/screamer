@@ -3,7 +3,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSImage, NSImageScaling, NSImageView, NSPanel,
     NSProgressIndicator, NSProgressIndicatorStyle, NSTextAlignment, NSTextField, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSDate, NSRunLoop, NSString};
@@ -11,14 +11,15 @@ use std::path::PathBuf;
 
 const PANEL_WIDTH: f64 = 320.0;
 const PANEL_HEIGHT: f64 = 208.0;
+const UI_PUMP_INTERVAL_SECS: f64 = 1.0 / 120.0;
 
 pub struct LoadingWindow {
     panel: Retained<NSPanel>,
 }
 
 impl LoadingWindow {
-    pub fn show(mtm: MainThreadMarker, _app: &NSApplication) -> Self {
-        let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+    pub fn show(mtm: MainThreadMarker, app: &NSApplication) -> Self {
+        let style = NSWindowStyleMask::Borderless;
         let frame = CGRect::new(
             CGPoint::new(0.0, 0.0),
             CGSize::new(PANEL_WIDTH, PANEL_HEIGHT),
@@ -36,6 +37,10 @@ impl LoadingWindow {
         panel.setOpaque(false);
         panel.setHasShadow(true);
         panel.setMovableByWindowBackground(false);
+        panel.setBecomesKeyOnlyIfNeeded(false);
+        panel.setWorksWhenModal(true);
+        panel.setHidesOnDeactivate(false);
+        panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -117,13 +122,13 @@ impl LoadingWindow {
         }
         content_view.addSubview(&spinner);
 
+        app.activate();
+        panel.makeKeyAndOrderFront(None);
         panel.orderFrontRegardless();
         panel.displayIfNeeded();
 
         // Give AppKit one short turn to paint before synchronous model loading begins.
-        let run_loop = NSRunLoop::currentRunLoop();
-        let deadline = NSDate::dateWithTimeIntervalSinceNow(0.06);
-        run_loop.runUntilDate(&deadline);
+        pump();
 
         Self { panel }
     }
@@ -132,6 +137,12 @@ impl LoadingWindow {
         self.panel.orderOut(None);
         self.panel.close();
     }
+}
+
+pub fn pump() {
+    let run_loop = NSRunLoop::currentRunLoop();
+    let deadline = NSDate::dateWithTimeIntervalSinceNow(UI_PUMP_INTERVAL_SECS);
+    run_loop.runUntilDate(&deadline);
 }
 
 fn label(

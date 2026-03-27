@@ -39,6 +39,8 @@ pub struct Config {
     pub overlay_position: OverlayPosition,
     #[serde(default = "default_live_transcription")]
     pub live_transcription: bool,
+    #[serde(default = "default_sound_effects")]
+    pub sound_effects: bool,
 }
 
 impl Default for Config {
@@ -48,11 +50,16 @@ impl Default for Config {
             hotkey: "left_control".to_string(),
             overlay_position: OverlayPosition::default(),
             live_transcription: default_live_transcription(),
+            sound_effects: default_sound_effects(),
         }
     }
 }
 
 fn default_live_transcription() -> bool {
+    true
+}
+
+fn default_sound_effects() -> bool {
     true
 }
 
@@ -193,6 +200,7 @@ mod tests {
         assert_eq!(config.hotkey, "left_control");
         assert_eq!(config.overlay_position, OverlayPosition::Center);
         assert!(config.live_transcription);
+        assert!(config.sound_effects);
     }
 
     #[test]
@@ -202,6 +210,7 @@ mod tests {
             hotkey: "fn".to_string(),
             overlay_position: OverlayPosition::Bottom,
             live_transcription: false,
+            sound_effects: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -209,15 +218,18 @@ mod tests {
         assert_eq!(parsed.hotkey, "fn");
         assert_eq!(parsed.overlay_position, OverlayPosition::Bottom);
         assert!(!parsed.live_transcription);
+        assert!(!parsed.sound_effects);
     }
 
     #[test]
     fn config_backward_compat() {
-        // Old config without overlay_position/live_transcription should deserialize with defaults
+        // Old config without overlay_position/live_transcription/sound_effects should deserialize
+        // with defaults.
         let json = r#"{"model":"base","hotkey":"left_control"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.overlay_position, OverlayPosition::Center);
         assert!(config.live_transcription);
+        assert!(config.sound_effects);
     }
 
     #[test]

@@ -56,6 +56,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSProgressIndicator",
     "NSParagraphStyle",
     "NSWindowScripting",
+    "NSSound",
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 core-graphics = "0.24"

@@ -8,11 +8,13 @@ mod model_paths;
 mod overlay;
 mod paster;
 mod recorder;
+mod sound;
 mod transcriber;
 
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 use std::fs::OpenOptions;
+use std::sync::mpsc;
 
 fn main() {
     // Redirect stderr to a log file so we can debug when launched via `open`
@@ -43,7 +45,7 @@ fn main() {
 
     // Initialize NSApplication
     let ns_app = NSApplication::sharedApplication(mtm);
-    ns_app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    let _ = ns_app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
     ns_app.finishLaunching();
 
     let loading = loading::LoadingWindow::show(mtm, &ns_app);
@@ -53,8 +55,31 @@ fn main() {
         eprintln!("[screamer] WARNING: Accessibility permissions not granted");
     }
 
-    // Create app (loads model, sets up menubar)
-    let app = match app::App::new(mtm) {
+    let config = config::Config::load();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let load_config = config.clone();
+    std::thread::spawn(move || {
+        let result = app::App::load_transcriber(&load_config);
+        let _ = tx.send(result);
+    });
+
+    let transcriber = loop {
+        match rx.try_recv() {
+            Ok(result) => break result,
+            Err(mpsc::TryRecvError::Empty) => loading::pump(),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err(app::AppInitError {
+                    title: "Startup Error",
+                    message: "The background model loader exited unexpectedly.".to_string(),
+                })
+            }
+        }
+    };
+
+    // Create app (sets up menubar/UI after background model loading completes)
+    let app = match transcriber
+        .and_then(|transcriber| app::App::new_with_transcriber(mtm, config, transcriber))
+    {
         Ok(a) => a,
         Err(err) => {
             loading.close();
@@ -64,10 +89,10 @@ fn main() {
         }
     };
 
-    loading.close();
-
     // Start hotkey listener and waveform timer
     app.start(mtm);
+    loading.close();
+    let _ = ns_app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
 
     eprintln!("[screamer] Ready — hold Left Control to record");
 
