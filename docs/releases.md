@@ -3,7 +3,7 @@
 This repo now supports two DMG release paths:
 
 - Manual local DMG builds for testing or one-off releases.
-- Automated GitHub releases that rebuild the DMG whenever `main` changes.
+- Automated GitHub releases that run on version tags or manual dispatch.
 
 ## 1. Manual local DMG release
 
@@ -63,7 +63,7 @@ Paste that into the `APPLE_CERTIFICATE_P12_BASE64` GitHub secret.
 
 ## 3. What the workflow does
 
-### On every push to `main`
+### On manual workflow dispatch
 
 - Builds a universal macOS binary (`arm64` + `x86_64`)
 - Bundles the app and the default `base` Whisper model
@@ -99,3 +99,7 @@ git push origin v1.0.2
 ```
 
 That tag will produce a notarized GitHub release DMG if the signing secrets are configured.
+
+## 5. Creating an untagged DMG from GitHub
+
+If you want a fresh prerelease DMG without cutting a tag, run the `Release macOS DMG` workflow manually from the Actions tab. That path updates the `continuous` prerelease and publishes `Screamer-latest.dmg`.

@@ -58,7 +58,7 @@ thread_local! {
     static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
 }
 
-static MICROPHONE_PERMISSION_REMINDER_SHOWN: AtomicBool = AtomicBool::new(false);
+static MICROPHONE_PERMISSION_GUIDANCE_SHOWN: AtomicBool = AtomicBool::new(false);
 
 pub struct App {
     _status_item: Retained<NSStatusItem>,
@@ -194,6 +194,26 @@ fn open_microphone_settings() {
         .spawn()
     {
         eprintln!("[screamer] Failed to open Microphone settings: {err}");
+    }
+}
+
+fn show_missing_microphone_permission_guidance() {
+    let should_show = MICROPHONE_PERMISSION_GUIDANCE_SHOWN
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+
+    if !should_show {
+        return;
+    }
+
+    show_settings_window();
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        App::show_alert(
+            mtm,
+            "Microphone Permission Required",
+            "Screamer can't record until microphone access is enabled. Open Screamer Settings and click Microphone to jump to System Settings, then try recording again.",
+        );
     }
 }
 
@@ -895,6 +915,15 @@ impl App {
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
+                    if !permissions::has_microphone_permission() {
+                        eprintln!(
+                            "[screamer] Microphone permission missing; blocking recording before capture starts"
+                        );
+                        is_rec_press.store(false, Ordering::SeqCst);
+                        show_missing_microphone_permission_guidance();
+                        return;
+                    }
+
                     let session = recording_session_press.fetch_add(1, Ordering::SeqCst) + 1;
                     if let Ok(mut transcript) = live_transcript_press.lock() {
                         transcript.clear();
@@ -1120,24 +1149,10 @@ fn start_recording_capture(
     }
 
     if !permissions::has_microphone_permission() {
-        eprintln!("[screamer] Microphone permission missing; skipping audio capture");
+        eprintln!(
+            "[screamer] Microphone permission missing during capture start; skipping audio capture"
+        );
         is_recording.store(false, Ordering::SeqCst);
-
-        let should_remind = MICROPHONE_PERMISSION_REMINDER_SHOWN
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-
-        if should_remind {
-            open_microphone_settings();
-            if let Some(mtm) = MainThreadMarker::new() {
-                App::show_alert(
-                    mtm,
-                    "Microphone Permission Required",
-                    "Enable Screamer in System Settings -> Privacy & Security -> Microphone, then try recording again.",
-                );
-            }
-        }
-
         return;
     }
 
