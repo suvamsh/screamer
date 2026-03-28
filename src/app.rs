@@ -915,13 +915,23 @@ impl App {
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    if !permissions::has_microphone_permission() {
-                        eprintln!(
-                            "[screamer] Microphone permission missing; blocking recording before capture starts"
-                        );
-                        is_rec_press.store(false, Ordering::SeqCst);
-                        show_missing_microphone_permission_guidance();
-                        return;
+                    match permissions::prepare_microphone_permission() {
+                        permissions::MicrophonePermissionOutcome::Granted => {}
+                        permissions::MicrophonePermissionOutcome::Prompted => {
+                            eprintln!(
+                                "[screamer] Requested microphone permission; waiting for the user to respond"
+                            );
+                            is_rec_press.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                        permissions::MicrophonePermissionOutcome::Denied => {
+                            eprintln!(
+                                "[screamer] Microphone permission missing; blocking recording before capture starts"
+                            );
+                            is_rec_press.store(false, Ordering::SeqCst);
+                            show_missing_microphone_permission_guidance();
+                            return;
+                        }
                     }
 
                     let session = recording_session_press.fetch_add(1, Ordering::SeqCst) + 1;

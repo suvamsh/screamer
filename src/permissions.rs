@@ -6,13 +6,26 @@ use objc2::msg_send;
 use objc2::runtime::{AnyClass, Bool};
 use objc2_foundation::NSString;
 use std::ffi::c_void;
-use std::sync::mpsc;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionStatus {
     pub microphone_granted: bool,
     pub accessibility_granted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophonePermissionState {
+    Authorized,
+    NotDetermined,
+    Denied,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophonePermissionOutcome {
+    Granted,
+    Prompted,
+    Denied,
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -30,7 +43,7 @@ const AV_AUTHORIZATION_STATUS_AUTHORIZED: isize = 3;
 
 pub fn request_startup_permissions(prompt_for_accessibility: bool) -> PermissionStatus {
     PermissionStatus {
-        microphone_granted: request_microphone_access_if_needed(),
+        microphone_granted: has_microphone_permission(),
         accessibility_granted: if prompt_for_accessibility {
             request_accessibility_if_needed()
         } else {
@@ -44,21 +57,34 @@ pub fn has_accessibility_permission() -> bool {
 }
 
 pub fn has_microphone_permission() -> bool {
-    microphone_authorization_status()
-        .map(|status| status == AV_AUTHORIZATION_STATUS_AUTHORIZED)
-        .unwrap_or(true)
+    matches!(
+        microphone_permission_state(),
+        MicrophonePermissionState::Authorized | MicrophonePermissionState::Unknown
+    )
 }
 
-fn request_microphone_access_if_needed() -> bool {
-    let Some(status) = microphone_authorization_status() else {
-        return true;
-    };
+pub fn prepare_microphone_permission() -> MicrophonePermissionOutcome {
+    match microphone_permission_state() {
+        MicrophonePermissionState::Authorized | MicrophonePermissionState::Unknown => {
+            MicrophonePermissionOutcome::Granted
+        }
+        MicrophonePermissionState::NotDetermined => {
+            request_microphone_access();
+            MicrophonePermissionOutcome::Prompted
+        }
+        MicrophonePermissionState::Denied => MicrophonePermissionOutcome::Denied,
+    }
+}
 
-    match status {
-        AV_AUTHORIZATION_STATUS_AUTHORIZED => true,
-        AV_AUTHORIZATION_STATUS_NOT_DETERMINED => request_microphone_access(),
-        AV_AUTHORIZATION_STATUS_DENIED => false,
-        _ => false,
+pub fn microphone_permission_state() -> MicrophonePermissionState {
+    match microphone_authorization_status() {
+        Some(AV_AUTHORIZATION_STATUS_AUTHORIZED) => MicrophonePermissionState::Authorized,
+        Some(AV_AUTHORIZATION_STATUS_NOT_DETERMINED) => {
+            MicrophonePermissionState::NotDetermined
+        }
+        Some(AV_AUTHORIZATION_STATUS_DENIED) => MicrophonePermissionState::Denied,
+        Some(_) => MicrophonePermissionState::Denied,
+        None => MicrophonePermissionState::Unknown,
     }
 }
 
@@ -72,16 +98,18 @@ fn microphone_authorization_status() -> Option<isize> {
     Some(unsafe { msg_send![capture_device_class, authorizationStatusForMediaType: &*media_type] })
 }
 
-fn request_microphone_access() -> bool {
+fn request_microphone_access() {
     let Some(capture_device_class) = AnyClass::get(c"AVCaptureDevice") else {
         eprintln!("[screamer] AVCaptureDevice class unavailable");
-        return true;
+        return;
     };
 
     let media_type = NSString::from_str("soun");
-    let (tx, rx) = mpsc::channel();
     let block = block2::RcBlock::new(move |granted: Bool| {
-        let _ = tx.send(granted.as_bool());
+        eprintln!(
+            "[screamer] Microphone permission prompt resolved: {}",
+            granted.as_bool()
+        );
     });
 
     unsafe {
@@ -91,8 +119,6 @@ fn request_microphone_access() -> bool {
             completionHandler: &*block
         ];
     }
-
-    rx.recv_timeout(Duration::from_secs(30)).unwrap_or(false)
 }
 
 fn request_accessibility_if_needed() -> bool {
