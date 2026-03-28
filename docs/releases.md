@@ -83,9 +83,9 @@ Landing-page link for always-fresh builds:
   - `Screamer-1.0.2.dmg`
   - `Screamer.dmg`
 
-Landing-page link for the latest official tagged release:
+Landing-page link for the stable public release:
 
-[`https://github.com/suvamsh/screamer/releases/latest/download/Screamer.dmg`](https://github.com/suvamsh/screamer/releases/latest/download/Screamer.dmg)
+[`https://github.com/suvamsh/screamer/releases/download/stable/Screamer.dmg`](https://github.com/suvamsh/screamer/releases/download/stable/Screamer.dmg)
 
 ## 4. Cutting an official release
 

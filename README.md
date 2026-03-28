@@ -12,6 +12,7 @@ Push-to-talk transcription. Hold a key, speak, release, and your text is pasted 
 [![Metal GPU](https://img.shields.io/badge/Metal-GPU_Accelerated-0071E3?style=for-the-badge&logo=apple&logoColor=white)](#performance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge)](LICENSE)
 [![100% Offline](https://img.shields.io/badge/100%25-Offline-8B5CF6?style=for-the-badge&logo=shieldsdotio&logoColor=white)](#)
+[![Download for Mac](https://img.shields.io/badge/Download_for_Mac-Screamer.dmg-111111?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/suvamsh/screamer/releases/download/stable/Screamer.dmg)
 
 </div>
 
