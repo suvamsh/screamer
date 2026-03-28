@@ -6,12 +6,9 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/screamer-latency.XXXXXX")"
 ITERATIONS="${ITERATIONS:-15}"
 WARMUP="${WARMUP:-2}"
 MODEL="${MODEL:-base}"
+DEVICE_RATE="${DEVICE_RATE:-48000}"
+DISPATCH_PASTE="${DISPATCH_PASTE:-1}"
 WHISPER_LOG="${WHISPER_LOG:-/tmp/screamer-latency-whisper.log}"
-THREADS="${THREADS:-}"
-FRESH_STATE="${FRESH_STATE:-0}"
-TIMESTAMPS="${TIMESTAMPS:-0}"
-AUDIO_CTX="${AUDIO_CTX:-}"
-FULL_AUDIO_CTX="${FULL_AUDIO_CTX:-0}"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -36,34 +33,33 @@ synthesize() {
   local raw="$TMP_DIR/$name.f32"
 
   say -o "$aiff" "$text"
-  ffmpeg -hide_banner -loglevel error -y -i "$aiff" -ac 1 -ar 16000 -f f32le "$raw"
+  ffmpeg -hide_banner -loglevel error -y -i "$aiff" -ac 1 -ar "$DEVICE_RATE" -f f32le "$raw"
 
   printf "%-16s %6.2fs  %s\n" "$name" "$(duration_seconds "$aiff")" "$text"
+}
+
+prepare_paste_target() {
+  osascript \
+    -e 'tell application "TextEdit" to activate' \
+    -e 'tell application "TextEdit" to if (count of documents) = 0 then make new document' \
+    -e 'tell application "TextEdit" to set text of document 1 to ""' \
+    -e 'delay 0.2' >/dev/null
 }
 
 require_cmd say
 require_cmd ffmpeg
 require_cmd ffprobe
+if [[ "$DISPATCH_PASTE" == "1" ]]; then
+  require_cmd osascript
+fi
 
-echo "Screamer latency verification"
+echo "Screamer app-path latency verification"
 echo "  machine: $(sysctl -n machdep.cpu.brand_string)"
 echo "  model: $MODEL"
+echo "  device sample rate: $DEVICE_RATE Hz"
+echo "  dispatch paste: $([[ "$DISPATCH_PASTE" == "1" ]] && echo yes || echo no)"
 echo "  temp dir: $TMP_DIR"
 echo "  whisper log: $WHISPER_LOG"
-if [[ -n "$THREADS" ]]; then
-  echo "  threads override: $THREADS"
-fi
-if [[ "$FRESH_STATE" == "1" ]]; then
-  echo "  fresh state: yes"
-fi
-if [[ "$TIMESTAMPS" == "1" ]]; then
-  echo "  generate timestamps: yes"
-fi
-if [[ -n "$AUDIO_CTX" ]]; then
-  echo "  audio ctx override: $AUDIO_CTX"
-elif [[ "$FULL_AUDIO_CTX" == "1" ]]; then
-  echo "  audio ctx: default"
-fi
 echo
 echo "Synthesizing benchmark audio:"
 synthesize "short_phrase" "Schedule lunch with Maya tomorrow."
@@ -71,41 +67,25 @@ synthesize "sentence" "I shipped the recorder fix this morning, and it looks sta
 synthesize "long_paragraph" "I shipped the recorder fix this morning, and I want to test the release build again before we publish the update."
 echo
 
-BENCH_ARGS=()
-if [[ -n "$THREADS" ]]; then
-  BENCH_ARGS+=(--threads "$THREADS")
-fi
-if [[ "$FRESH_STATE" == "1" ]]; then
-  BENCH_ARGS+=(--fresh-state)
-fi
-if [[ "$TIMESTAMPS" == "1" ]]; then
-  BENCH_ARGS+=(--timestamps)
-fi
-if [[ "$FULL_AUDIO_CTX" == "1" ]]; then
-  BENCH_ARGS+=(--full-audio-ctx)
-elif [[ -n "$AUDIO_CTX" ]]; then
-  BENCH_ARGS+=(--audio-ctx "$AUDIO_CTX")
+BENCH_ARGS=(
+  --model "$MODEL"
+  --warmup "$WARMUP"
+  --iterations "$ITERATIONS"
+  --device-rate "$DEVICE_RATE"
+)
+
+if [[ "$DISPATCH_PASTE" == "1" ]]; then
+  echo "Preparing TextEdit as the paste target for dispatch timing..."
+  prepare_paste_target
+  BENCH_ARGS+=(--dispatch-paste)
+  echo
 fi
 
 cd "$ROOT"
-cargo build --release --bin latency_bench
-if (( ${#BENCH_ARGS[@]} > 0 )); then
-  target/release/latency_bench \
-    --model "$MODEL" \
-    --warmup "$WARMUP" \
-    --iterations "$ITERATIONS" \
-    "${BENCH_ARGS[@]}" \
-    "$TMP_DIR/short_phrase.f32" \
-    "$TMP_DIR/sentence.f32" \
-    "$TMP_DIR/long_paragraph.f32" \
-    2>"$WHISPER_LOG"
-else
-  target/release/latency_bench \
-    --model "$MODEL" \
-    --warmup "$WARMUP" \
-    --iterations "$ITERATIONS" \
-    "$TMP_DIR/short_phrase.f32" \
-    "$TMP_DIR/sentence.f32" \
-    "$TMP_DIR/long_paragraph.f32" \
-    2>"$WHISPER_LOG"
-fi
+cargo build --release --bin app_path_latency
+target/release/app_path_latency \
+  "${BENCH_ARGS[@]}" \
+  "$TMP_DIR/short_phrase.f32" \
+  "$TMP_DIR/sentence.f32" \
+  "$TMP_DIR/long_paragraph.f32" \
+  2>"$WHISPER_LOG"

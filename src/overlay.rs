@@ -56,7 +56,11 @@ fn smooth_height(current: f64, target: f64) -> f64 {
 }
 
 impl Overlay {
-    pub fn new(mtm: MainThreadMarker, position: OverlayPosition, appearance: AppAppearance) -> Self {
+    pub fn new(
+        mtm: MainThreadMarker,
+        position: OverlayPosition,
+        appearance: AppAppearance,
+    ) -> Self {
         let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
 
         let frame = CGRect::new(

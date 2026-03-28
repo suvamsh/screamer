@@ -79,9 +79,7 @@ pub fn prepare_microphone_permission() -> MicrophonePermissionOutcome {
 pub fn microphone_permission_state() -> MicrophonePermissionState {
     match microphone_authorization_status() {
         Some(AV_AUTHORIZATION_STATUS_AUTHORIZED) => MicrophonePermissionState::Authorized,
-        Some(AV_AUTHORIZATION_STATUS_NOT_DETERMINED) => {
-            MicrophonePermissionState::NotDetermined
-        }
+        Some(AV_AUTHORIZATION_STATUS_NOT_DETERMINED) => MicrophonePermissionState::NotDetermined,
         Some(AV_AUTHORIZATION_STATUS_DENIED) => MicrophonePermissionState::Denied,
         Some(_) => MicrophonePermissionState::Denied,
         None => MicrophonePermissionState::Unknown,

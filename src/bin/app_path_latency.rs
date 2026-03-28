@@ -132,6 +132,8 @@ fn main() -> Result<(), String> {
         print_result(result, cli.device_rate);
     }
 
+    print_overall_summary(&results);
+
     Ok(())
 }
 
@@ -244,6 +246,51 @@ fn print_result(result: &SampleResult, device_rate: u32) {
     println!(
         "  transcribe detail mean: state {:.3} ms | infer {:.3} ms | extract {:.3} ms",
         state.mean, infer.mean, extract.mean
+    );
+    println!();
+}
+
+fn print_overall_summary(results: &[SampleResult]) {
+    if results.is_empty() {
+        return;
+    }
+
+    let total_ms: Vec<f64> = results
+        .iter()
+        .flat_map(|result| result.total_ms.iter().copied())
+        .collect();
+    let stop_ms: Vec<f64> = results
+        .iter()
+        .flat_map(|result| result.stop_ms.iter().copied())
+        .collect();
+    let transcribe_ms: Vec<f64> = results
+        .iter()
+        .flat_map(|result| result.transcribe_ms.iter().copied())
+        .collect();
+    let paste_ms: Vec<f64> = results
+        .iter()
+        .flat_map(|result| result.paste_ms.iter().copied())
+        .collect();
+
+    let total = Stats::from_samples(&total_ms);
+    let stop = Stats::from_samples(&stop_ms);
+    let transcribe = Stats::from_samples(&transcribe_ms);
+    let paste = Stats::from_samples(&paste_ms);
+
+    println!("overall");
+    println!(
+        "  average app-path latency: {:.3} ms across {} phrases x {} measured runs",
+        total.mean,
+        results.len(),
+        total_ms.len()
+    );
+    println!(
+        "  aggregate total: min {:.3} ms | p50 {:.3} ms | p95 {:.3} ms | mean {:.3} ms",
+        total.min, total.p50, total.p95, total.mean
+    );
+    println!(
+        "  aggregate stage mean: stop {:.3} ms | transcribe {:.3} ms | paste {:.3} ms",
+        stop.mean, transcribe.mean, paste.mean
     );
     println!();
 }
