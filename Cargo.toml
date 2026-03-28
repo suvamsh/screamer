@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 whisper-rs = { version = "0.14", features = ["metal"] }
-cpal = "0.15"
+cpal = "0.17"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
