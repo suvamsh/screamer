@@ -11,7 +11,7 @@ rust-version = "1.94"
 publish = false
 
 [dependencies]
-whisper-rs = { version = "0.14", features = ["metal"] }
+whisper-rs = { version = "0.16", features = ["metal"] }
 cpal = "0.15"
 objc2 = "0.6"
 block2 = "0.6"
