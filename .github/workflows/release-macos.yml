@@ -14,7 +14,7 @@ permissions:
 jobs:
   release:
     runs-on: macos-14
-    environment: Configure DMG Bundle
+    environment: DMG Bundle
     env:
       CARGO_TERM_COLOR: always
       GGML_NATIVE: OFF
