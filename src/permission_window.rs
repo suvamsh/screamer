@@ -67,7 +67,7 @@ impl PermissionWindow {
         let button = unsafe {
             NSButton::buttonWithTitle_target_action(
                 &NSString::from_str("Open Accessibility Settings"),
-                Some(&*(handler as *const AnyObject)),
+                Some(&*handler),
                 Some(sel!(openAccessibilitySettings:)),
                 mtm,
             )
@@ -82,7 +82,7 @@ impl PermissionWindow {
         let dismiss = unsafe {
             NSButton::buttonWithTitle_target_action(
                 &NSString::from_str("Dismiss"),
-                Some(&*(handler as *const AnyObject)),
+                Some(&*handler),
                 Some(sel!(dismissAccessibilityHelper:)),
                 mtm,
             )

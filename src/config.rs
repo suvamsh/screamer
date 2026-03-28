@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -164,18 +165,46 @@ impl Config {
         fs::read_to_string(&path)
             .ok()
             .and_then(|contents| serde_json::from_str(&contents).ok())
+            .map(Self::normalized)
             .unwrap_or_default()
     }
 
     pub fn save(&self) {
         let dir = Self::config_dir();
-        let _ = fs::create_dir_all(&dir);
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let path = Self::config_path();
-            let tmp = path.with_extension("json.tmp");
-            if fs::write(&tmp, &json).is_ok() {
-                let _ = fs::rename(&tmp, &path);
+        if let Err(err) = fs::create_dir_all(&dir) {
+            eprintln!("[screamer] Failed to create config directory: {err}");
+            return;
+        }
+
+        let normalized = self.clone().normalized();
+        let mut json = match serde_json::to_vec_pretty(&normalized) {
+            Ok(json) => json,
+            Err(err) => {
+                eprintln!("[screamer] Failed to serialize config: {err}");
+                return;
             }
+        };
+        json.push(b'\n');
+
+        let path = Self::config_path();
+        let tmp = path.with_extension("json.tmp");
+        let mut file = match File::create(&tmp) {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("[screamer] Failed to create temporary config file: {err}");
+                return;
+            }
+        };
+
+        if let Err(err) = file.write_all(&json).and_then(|_| file.sync_all()) {
+            eprintln!("[screamer] Failed to write config: {err}");
+            let _ = fs::remove_file(&tmp);
+            return;
+        }
+
+        if let Err(err) = fs::rename(&tmp, &path) {
+            eprintln!("[screamer] Failed to replace config file: {err}");
+            let _ = fs::remove_file(&tmp);
         }
     }
 
@@ -196,6 +225,20 @@ impl Config {
             .find(|p| p.id == self.overlay_position)
             .map(|p| p.label)
             .unwrap_or("Center")
+    }
+
+    fn normalized(mut self) -> Self {
+        let default = Self::default();
+
+        if !MODELS.iter().any(|model| model.id == self.model) {
+            self.model = default.model;
+        }
+
+        if !HOTKEYS.iter().any(|hotkey| hotkey.id == self.hotkey) {
+            self.hotkey = default.hotkey;
+        }
+
+        self
     }
 }
 
@@ -284,5 +327,18 @@ mod tests {
     fn config_from_invalid_json() {
         let result: Result<Config, _> = serde_json::from_str("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn normalize_invalid_config_values() {
+        let config = Config {
+            model: "unknown".to_string(),
+            hotkey: "unknown".to_string(),
+            ..Config::default()
+        }
+        .normalized();
+
+        assert_eq!(config.model, "base");
+        assert_eq!(config.hotkey, "left_control");
     }
 }

@@ -4,6 +4,7 @@ mod config;
 mod hardware;
 mod hotkey;
 mod loading;
+mod logging;
 mod model_paths;
 mod overlay;
 mod paster;
@@ -16,25 +17,12 @@ mod transcriber;
 
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
-use std::fs::OpenOptions;
 use std::sync::mpsc;
 
 fn main() {
-    // Redirect stderr to a log file so we can debug when launched via `open`
-    let log_path = "/tmp/screamer.log";
-    if let Ok(file) = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(log_path)
-    {
-        use std::os::unix::io::IntoRawFd;
-        let fd = file.into_raw_fd();
-        unsafe {
-            libc::dup2(fd, 2); // redirect stderr
-            libc::close(fd);
-        }
-    }
+    // Redirect stderr to a per-user log file so GUI launches remain debuggable
+    // without writing logs to a world-readable temp directory.
+    logging::init_stderr_log();
 
     eprintln!("[screamer] Starting up (PID: {})", std::process::id());
 
@@ -61,6 +49,9 @@ fn main() {
     if config.show_accessibility_helper_on_launch {
         config.show_accessibility_helper_on_launch = false;
         config.save();
+    }
+    if !permission_status.microphone_granted {
+        eprintln!("[screamer] WARNING: Microphone permission not granted");
     }
     if !permission_status.accessibility_granted {
         eprintln!("[screamer] WARNING: Accessibility permission not granted");

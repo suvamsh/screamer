@@ -24,6 +24,12 @@ Screamer is a free, open source, offline push-to-talk speech-to-text app for mac
 - Shows a live overlay with waveform and rolling preview while you talk
 - Built for low-latency dictation instead of full meeting transcription
 
+Project docs:
+
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Release guide](docs/releases.md)
+
 ## How it works
 
 ```text
@@ -76,8 +82,8 @@ All models are free to download with `./download_model.sh`.
 
 Requirements:
 
-- macOS 12+ on Apple Silicon and Intel Macs
-- [Rust toolchain](https://rustup.rs/)
+- macOS 13+ on Apple Silicon and Intel Macs
+- [Rust toolchain](https://rustup.rs/) 1.94+
 - `cmake` via `brew install cmake`
 
 Build from source:
@@ -85,7 +91,7 @@ Build from source:
 ```bash
 git clone https://github.com/suvamsh/screamer.git
 cd screamer
-./download_model.sh
+./download_model.sh base
 GGML_NATIVE=OFF cargo build --release
 ./bundle.sh
 open Screamer.app
@@ -96,6 +102,8 @@ After first launch, grant **Accessibility** permission in:
 `System Settings -> Privacy & Security -> Accessibility -> Screamer`
 
 This is required for the global hotkey and paste simulation. If it isn't enabled yet, Screamer will keep an in-app helper window visible and can open the exact Accessibility pane for you.
+
+macOS will also prompt for **Microphone** permission the first time you record.
 
 `bundle.sh` will automatically try the first installed `Developer ID Application` certificate if one is available, which helps macOS keep Accessibility approval across rebuilds. If no usable certificate is installed, it falls back to ad-hoc signing and macOS may ask you to re-enable Accessibility after rebuilds.
 
@@ -109,7 +117,9 @@ Config lives at `~/Library/Application Support/Screamer/config.json`:
   "hotkey": "left_control",
   "overlay_position": "center",
   "live_transcription": true,
-  "sound_effects": true
+  "sound_effects": true,
+  "show_accessibility_helper_on_launch": true,
+  "accessibility_helper_dismissed": false
 }
 ```
 
@@ -120,6 +130,16 @@ Key settings:
 - `overlay_position`: overlay placement
 - `live_transcription`: live preview in the overlay
 - `sound_effects`: start and finish cue sounds
+- `show_accessibility_helper_on_launch`: whether the helper window should appear on first launch
+- `accessibility_helper_dismissed`: remembers whether the helper window was dismissed
+
+## Privacy and logging
+
+- Transcription runs locally. Screamer does not send audio or text to a cloud service.
+- Runtime logs are written to `~/Library/Logs/Screamer/screamer.log` by default.
+- Transcript contents are not logged by default.
+- Set `SCREAMER_LOG_TRANSCRIPTS=1` only when you explicitly want transcript text in logs for debugging.
+- Set `SCREAMER_LOG_FILE=/custom/path.log` to override the log file location.
 
 ## Stack
 

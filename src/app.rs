@@ -1,4 +1,5 @@
 use crate::config::{Config, HOTKEYS, MODELS, POSITIONS};
+use crate::logging;
 use crate::overlay::{Overlay, WAVEFORM_BINS};
 use crate::permission_window::PermissionWindow;
 use crate::permissions;
@@ -16,7 +17,9 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSString};
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::ffi::{OsStr, OsString};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -34,6 +37,11 @@ const SPEECH_DETECTION_FRAME_SAMPLES: usize = 320;
 const SPEECH_DETECTION_FRAME_RMS_GATE: f32 = 0.006;
 const SPEECH_DETECTION_MIN_ACTIVE_FRAMES: usize = 3;
 const SPEECH_TRIM_PADDING_SAMPLES: usize = 1600;
+const RELAUNCH_DELAY_SECONDS: &str = "0.5";
+const RELAUNCH_SHELL: &str = "/bin/sh";
+const OPEN_COMMAND: &str = "/usr/bin/open";
+const ACCESSIBILITY_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
 // Thread-local overlay reference so menu handlers can update position without relaunch.
 // Safe because all menu handlers and overlay access run on the main thread.
@@ -168,9 +176,12 @@ pub fn sync_accessibility_window() {
 
 fn open_accessibility_settings() {
     set_accessibility_helper_dismissed(false);
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
+    if let Err(err) = std::process::Command::new(OPEN_COMMAND)
+        .arg(ACCESSIBILITY_SETTINGS_URL)
+        .spawn()
+    {
+        eprintln!("[screamer] Failed to open Accessibility settings: {err}");
+    }
 }
 
 fn dismiss_accessibility_helper() {
@@ -379,25 +390,25 @@ extern "C" fn application_should_handle_reopen(
 
 fn relaunch() {
     eprintln!("[screamer] Relaunching...");
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(app_path) = exe
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-        {
-            let app_str = app_path.display().to_string();
-            eprintln!("[screamer] Relaunching from: {}", app_str);
-            let _ = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep 0.5 && open -a '{}'", app_str))
-                .spawn();
-        } else {
-            let exe_str = exe.display().to_string();
-            eprintln!("[screamer] Relaunching binary: {}", exe_str);
-            let _ = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep 0.5 && '{}'", exe_str))
-                .spawn();
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let launch_result = if let Some(app_path) = bundled_app_path(&exe) {
+                eprintln!("[screamer] Relaunching app bundle: {}", app_path.display());
+                spawn_delayed_command(
+                    OsStr::new(OPEN_COMMAND),
+                    &[OsString::from("-a"), app_path.into_os_string()],
+                )
+            } else {
+                eprintln!("[screamer] Relaunching binary: {}", exe.display());
+                spawn_delayed_command(exe.as_os_str(), &[])
+            };
+
+            if let Err(err) = launch_result {
+                eprintln!("[screamer] Failed to schedule relaunch: {err}");
+            }
+        }
+        Err(err) => {
+            eprintln!("[screamer] Failed to resolve current executable for relaunch: {err}");
         }
     }
 
@@ -949,10 +960,11 @@ impl App {
                         match t.transcribe_profiled(&samples[transcribe_range]) {
                             Ok(result) if !result.text.is_empty() => {
                                 eprintln!(
-                                    "[screamer] Transcribed in {}ms: {}",
+                                    "[screamer] Transcribed in {}ms ({} chars)",
                                     result.profile.total.as_millis(),
-                                    result.text
+                                    result.text.chars().count()
                                 );
+                                logging::log_transcript("Final transcript", &result.text);
 
                                 if !permissions::has_accessibility_permission() {
                                     eprintln!(
@@ -961,18 +973,28 @@ impl App {
                                 }
 
                                 let paste_t0 = std::time::Instant::now();
-                                crate::paster::paste(&result.text);
+                                let paste_result = crate::paster::paste(&result.text);
                                 let paste_ms = paste_t0.elapsed().as_millis();
 
-                                eprintln!(
-                                    "[screamer] Latency breakdown: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
-                                    stop_ms,
-                                    result.profile.state_acquire.as_millis(),
-                                    result.profile.inference.as_millis(),
-                                    result.profile.extract.as_millis(),
-                                    paste_ms,
-                                    release_t0.elapsed().as_millis()
-                                );
+                                match paste_result {
+                                    Ok(()) => {
+                                        eprintln!(
+                                            "[screamer] Latency breakdown: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
+                                            stop_ms,
+                                            result.profile.state_acquire.as_millis(),
+                                            result.profile.inference.as_millis(),
+                                            result.profile.extract.as_millis(),
+                                            paste_ms,
+                                            release_t0.elapsed().as_millis()
+                                        );
+                                    }
+                                    Err(err) => {
+                                        eprintln!(
+                                            "[screamer] Paste failed after {}ms: {}",
+                                            paste_ms, err
+                                        );
+                                    }
+                                }
                             }
                             Ok(_) => {
                                 eprintln!("[screamer] Empty transcription, skipping paste");
@@ -1171,7 +1193,7 @@ fn spawn_live_transcription_worker(
                         transcript.clear();
                         transcript.push_str(&display_text);
                     }
-                    eprintln!("[screamer] Live partial: {}", display_text);
+                    logging::log_transcript("Live partial", &display_text);
                     last_text = display_text;
                 }
                 Ok(None) => {}
@@ -1264,6 +1286,34 @@ fn format_live_transcript(text: &str) -> String {
         .unwrap_or(0);
     let tail = trimmed[tail_start..].trim_start();
     format!("...{}", tail)
+}
+
+fn bundled_app_path(exe: &Path) -> Option<PathBuf> {
+    let app_path = exe.parent()?.parent()?.parent()?.to_path_buf();
+    if app_path.extension().and_then(|ext| ext.to_str()) == Some("app") {
+        Some(app_path)
+    } else {
+        None
+    }
+}
+
+fn spawn_delayed_command(program: &OsStr, args: &[OsString]) -> Result<(), String> {
+    let mut command = std::process::Command::new(RELAUNCH_SHELL);
+    command
+        .arg("-c")
+        .arg("sleep \"$1\"; shift; exec \"$@\"")
+        .arg("screamer-relaunch")
+        .arg(RELAUNCH_DELAY_SECONDS)
+        .arg(program);
+
+    for arg in args {
+        command.arg(arg);
+    }
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("unable to launch helper process: {err}"))
 }
 
 #[cfg(test)]

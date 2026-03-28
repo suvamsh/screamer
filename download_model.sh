@@ -1,7 +1,8 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 MODELS_DIR="models"
+CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
 mkdir -p "$MODELS_DIR"
 
 MODEL="${1:-base}"
@@ -60,7 +61,29 @@ if [ -f "$DEST" ]; then
     exit 0
 fi
 
+if [ ! -x "$CURL_BIN" ]; then
+    echo "Error: curl not found at $CURL_BIN"
+    exit 1
+fi
+
+TMP_DEST="$(mktemp "${DEST}.partial.XXXXXX")"
+cleanup() {
+    rm -f "$TMP_DEST"
+}
+trap cleanup EXIT
+
 echo "Downloading $FILE ($SIZE)..."
-curl -L -o "$DEST" "$URL" --progress-bar
+"$CURL_BIN" \
+    --fail \
+    --show-error \
+    --location \
+    --proto '=https' \
+    --tlsv1.2 \
+    --progress-bar \
+    -o "$TMP_DEST" \
+    "$URL"
+
+mv "$TMP_DEST" "$DEST"
+trap - EXIT
 
 echo "Done: $DEST ($(du -h "$DEST" | cut -f1))"

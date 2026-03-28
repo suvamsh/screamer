@@ -2,6 +2,13 @@
 name = "screamer"
 version = "1.0.0"
 edition = "2021"
+description = "Offline push-to-talk speech-to-text app for macOS"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/suvamsh/screamer"
+homepage = "https://github.com/suvamsh/screamer"
+rust-version = "1.94"
+publish = false
 
 [dependencies]
 whisper-rs = { version = "0.14", features = ["metal"] }

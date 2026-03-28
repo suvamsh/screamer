@@ -185,22 +185,22 @@ impl SettingsWindow {
         );
 
         let mut row_y = title_y - 18.0 - ROW_HEIGHT;
-        add_select_row(mtm, &content, row_y, "Model", &model_popup);
+        add_row(mtm, &content, row_y, "Model", &model_popup);
 
         row_y -= CARD_SPACING + ROW_HEIGHT;
-        add_select_row(mtm, &content, row_y, "Hotkey", &hotkey_popup);
+        add_row(mtm, &content, row_y, "Hotkey", &hotkey_popup);
 
         row_y -= CARD_SPACING + ROW_HEIGHT;
-        add_select_row(mtm, &content, row_y, "Overlay Position", &position_popup);
+        add_row(mtm, &content, row_y, "Overlay Position", &position_popup);
 
         row_y -= CARD_SPACING + ROW_HEIGHT;
-        add_toggle_row(mtm, &content, row_y, "Live Transcription", &live_switch);
+        add_row(mtm, &content, row_y, "Live Transcription", &live_switch);
 
         row_y -= CARD_SPACING + ROW_HEIGHT;
-        add_toggle_row(mtm, &content, row_y, "Sound Effects", &sound_switch);
+        add_row(mtm, &content, row_y, "Sound Effects", &sound_switch);
 
         row_y -= CARD_SPACING + ROW_HEIGHT;
-        add_action_row(mtm, &content, row_y, "Accessibility", &accessibility_button);
+        add_row(mtm, &content, row_y, "Accessibility", &accessibility_button);
 
         let settings = Rc::new(Self {
             window,
@@ -248,33 +248,7 @@ impl SettingsWindow {
     }
 }
 
-fn add_select_row(mtm: MainThreadMarker, content: &NSView, y: f64, title: &str, control: &NSView) {
-    let card = row_card(
-        mtm,
-        CGRect::new(
-            CGPoint::new(OUTER_PADDING, y),
-            CGSize::new(CARD_WIDTH, ROW_HEIGHT),
-        ),
-    );
-    content.addSubview(&card);
-    add_row_label(mtm, &card, title);
-    card.addSubview(control);
-}
-
-fn add_toggle_row(mtm: MainThreadMarker, content: &NSView, y: f64, title: &str, control: &NSView) {
-    let card = row_card(
-        mtm,
-        CGRect::new(
-            CGPoint::new(OUTER_PADDING, y),
-            CGSize::new(CARD_WIDTH, ROW_HEIGHT),
-        ),
-    );
-    content.addSubview(&card);
-    add_row_label(mtm, &card, title);
-    card.addSubview(control);
-}
-
-fn add_action_row(mtm: MainThreadMarker, content: &NSView, y: f64, title: &str, control: &NSView) {
+fn add_row(mtm: MainThreadMarker, content: &NSView, y: f64, title: &str, control: &NSView) {
     let card = row_card(
         mtm,
         CGRect::new(

@@ -69,7 +69,7 @@ fn main() -> Result<(), String> {
         for _ in 0..cli.warmup {
             let output = transcriber.transcribe_profiled(&warmup_audio)?;
             if cli.dispatch_paste && !output.text.is_empty() {
-                paster::paste(&output.text);
+                paster::paste(&output.text)?;
             }
         }
 
@@ -99,7 +99,7 @@ fn main() -> Result<(), String> {
 
             let paste_t0 = Instant::now();
             if cli.dispatch_paste && !output.text.is_empty() {
-                paster::paste(&output.text);
+                paster::paste(&output.text)?;
             }
             let paste = paste_t0.elapsed().as_secs_f64() * 1000.0;
 
