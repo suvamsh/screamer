@@ -2,8 +2,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSButtonType, NSColor, NSFont, NSLineBreakMode,
-    NSTextAlignment, NSTextField, NSWindow, NSWindowStyleMask,
+    NSBackingStoreType, NSButton, NSButtonType, NSColor, NSFont, NSLineBreakMode, NSTextAlignment,
+    NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSString};

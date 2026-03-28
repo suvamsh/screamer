@@ -12,6 +12,16 @@ use std::path::PathBuf;
 const PANEL_WIDTH: f64 = 320.0;
 const PANEL_HEIGHT: f64 = 208.0;
 const UI_PUMP_INTERVAL_SECS: f64 = 1.0 / 120.0;
+const CONTENT_WIDTH: f64 = PANEL_WIDTH - 48.0;
+const LOGO_SIZE: f64 = 72.0;
+const TITLE_HEIGHT: f64 = 26.0;
+const SUBTITLE_HEIGHT: f64 = 20.0;
+const DIVIDER_HEIGHT: f64 = 1.0;
+const SPINNER_SIZE: f64 = 24.0;
+const LOGO_TITLE_GAP: f64 = 10.0;
+const TITLE_SUBTITLE_GAP: f64 = 6.0;
+const SUBTITLE_DIVIDER_GAP: f64 = 10.0;
+const DIVIDER_SPINNER_GAP: f64 = 15.0;
 
 pub struct LoadingWindow {
     panel: Retained<NSPanel>,
@@ -63,11 +73,28 @@ impl LoadingWindow {
             }
         }
 
+        // Keep the loading content as one centered stack with symmetric padding.
+        let content_height = LOGO_SIZE
+            + LOGO_TITLE_GAP
+            + TITLE_HEIGHT
+            + TITLE_SUBTITLE_GAP
+            + SUBTITLE_HEIGHT
+            + SUBTITLE_DIVIDER_GAP
+            + DIVIDER_HEIGHT
+            + DIVIDER_SPINNER_GAP
+            + SPINNER_SIZE;
+        let stack_bottom = (PANEL_HEIGHT - content_height) / 2.0;
+        let spinner_y = stack_bottom;
+        let divider_y = spinner_y + SPINNER_SIZE + DIVIDER_SPINNER_GAP;
+        let subtitle_y = divider_y + DIVIDER_HEIGHT + SUBTITLE_DIVIDER_GAP;
+        let title_y = subtitle_y + SUBTITLE_HEIGHT + TITLE_SUBTITLE_GAP;
+        let logo_y = title_y + TITLE_HEIGHT + LOGO_TITLE_GAP;
+
         if let Some(logo) = load_logo(mtm) {
             let logo_view = NSImageView::new(mtm);
             logo_view.setFrame(CGRect::new(
-                CGPoint::new(120.0, 116.0),
-                CGSize::new(80.0, 80.0),
+                CGPoint::new((PANEL_WIDTH - LOGO_SIZE) / 2.0, logo_y),
+                CGSize::new(LOGO_SIZE, LOGO_SIZE),
             ));
             logo_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
             logo_view.setImage(Some(&logo));
@@ -77,7 +104,10 @@ impl LoadingWindow {
         let title = label(
             mtm,
             "Loading Screamer…",
-            CGRect::new(CGPoint::new(24.0, 82.0), CGSize::new(272.0, 26.0)),
+            CGRect::new(
+                CGPoint::new((PANEL_WIDTH - CONTENT_WIDTH) / 2.0, title_y),
+                CGSize::new(CONTENT_WIDTH, TITLE_HEIGHT),
+            ),
             18.0,
             0.96,
         );
@@ -87,7 +117,10 @@ impl LoadingWindow {
         let subtitle = label(
             mtm,
             "Warming up the transcription model",
-            CGRect::new(CGPoint::new(24.0, 58.0), CGSize::new(272.0, 18.0)),
+            CGRect::new(
+                CGPoint::new((PANEL_WIDTH - CONTENT_WIDTH) / 2.0, subtitle_y),
+                CGSize::new(CONTENT_WIDTH, SUBTITLE_HEIGHT),
+            ),
             12.5,
             0.72,
         );
@@ -97,8 +130,8 @@ impl LoadingWindow {
 
         let divider = NSView::new(mtm);
         divider.setFrame(CGRect::new(
-            CGPoint::new(48.0, 52.0),
-            CGSize::new(PANEL_WIDTH - 96.0, 1.0),
+            CGPoint::new((PANEL_WIDTH - CONTENT_WIDTH) / 2.0, divider_y),
+            CGSize::new(CONTENT_WIDTH, DIVIDER_HEIGHT),
         ));
         divider.setWantsLayer(true);
         if let Some(layer) = divider.layer() {
@@ -112,7 +145,10 @@ impl LoadingWindow {
 
         let spinner = NSProgressIndicator::initWithFrame(
             mtm.alloc::<NSProgressIndicator>(),
-            CGRect::new(CGPoint::new(148.0, 24.0), CGSize::new(24.0, 24.0)),
+            CGRect::new(
+                CGPoint::new((PANEL_WIDTH - SPINNER_SIZE) / 2.0, spinner_y),
+                CGSize::new(SPINNER_SIZE, SPINNER_SIZE),
+            ),
         );
         spinner.setStyle(NSProgressIndicatorStyle::Spinning);
         spinner.setIndeterminate(true);

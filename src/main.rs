@@ -62,19 +62,8 @@ fn main() {
         config.show_accessibility_helper_on_launch = false;
         config.save();
     }
-    if !permission_status.microphone_granted {
-        eprintln!("[screamer] WARNING: Microphone permission not granted");
-    }
     if !permission_status.accessibility_granted {
         eprintln!("[screamer] WARNING: Accessibility permission not granted");
-    }
-    if !permission_status.microphone_granted {
-        let mut message = String::new();
-        message.push_str(
-            "Grant Microphone access so Screamer can record your speech.\n\n",
-        );
-        message.push_str("You can change these in System Settings > Privacy & Security.");
-        app::App::show_alert(mtm, "Permissions Required", &message);
     }
 
     let (tx, rx) = mpsc::sync_channel(1);
