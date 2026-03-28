@@ -8,6 +8,7 @@ mod model_paths;
 mod overlay;
 mod paster;
 mod recorder;
+mod settings_window;
 mod sound;
 mod transcriber;
 
@@ -46,6 +47,7 @@ fn main() {
     // Initialize NSApplication
     let ns_app = NSApplication::sharedApplication(mtm);
     let _ = ns_app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
+    app::install_main_menu(mtm, &ns_app);
     ns_app.finishLaunching();
 
     let loading = loading::LoadingWindow::show(mtm, &ns_app);
@@ -92,7 +94,7 @@ fn main() {
     // Start hotkey listener and waveform timer
     app.start(mtm);
     loading.close();
-    let _ = ns_app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    app::show_settings_window();
 
     eprintln!("[screamer] Ready — hold Left Control to record");
 

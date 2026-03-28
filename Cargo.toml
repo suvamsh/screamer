@@ -53,8 +53,10 @@ objc2-app-kit = { version = "0.3", features = [
     "NSControl",
     "NSButton",
     "NSImageView",
+    "NSPopUpButton",
     "NSProgressIndicator",
     "NSParagraphStyle",
+    "NSSwitch",
     "NSWindowScripting",
     "NSSound",
 ] }

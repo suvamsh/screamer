@@ -15,8 +15,6 @@
   <string>Screamer</string>
   <key>CFBundleIconFile</key>
   <string>icon.icns</string>
-  <key>LSUIElement</key>
-  <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Screamer needs microphone access to record your speech for transcription.</string>
   <key>NSAccessibilityUsageDescription</key>

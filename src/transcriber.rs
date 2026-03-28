@@ -9,7 +9,6 @@ use whisper_rs::{
 
 const AUDIO_CTX_SAMPLES_PER_UNIT: usize = 320;
 const AUDIO_CTX_GRANULARITY: i32 = 64;
-
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum AudioContextStrategy {
@@ -74,6 +73,12 @@ impl StateAccess<'_> {
             Self::Owned(state) => state,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodePreset {
+    Fast,
+    Conservative,
 }
 
 pub struct Transcriber {
@@ -155,9 +160,30 @@ impl Transcriber {
         let total_t0 = Instant::now();
         let state_t0 = Instant::now();
         let mut state = self.acquire_final_state()?;
-        let state_acquire = state_t0.elapsed();
+        let mut state_acquire = state_t0.elapsed();
 
-        let (text, inference, extract) = self.run_with_state(state.as_mut(), samples)?;
+        let (mut text, mut inference, mut extract) =
+            self.run_with_state(state.as_mut(), samples, DecodePreset::Fast)?;
+
+        if transcript_looks_repetitive(&text) {
+            eprintln!(
+                "[screamer] Suspicious repetition detected, retrying with conservative decode"
+            );
+
+            let retry_state_t0 = Instant::now();
+            let mut retry_state = self.create_state()?;
+            state_acquire += retry_state_t0.elapsed();
+
+            let (retry_text, retry_inference, retry_extract) =
+                self.run_with_state(&mut retry_state, samples, DecodePreset::Conservative)?;
+
+            inference += retry_inference;
+            extract += retry_extract;
+
+            if !retry_text.trim().is_empty() && !transcript_looks_repetitive(&retry_text) {
+                text = retry_text;
+            }
+        }
 
         Ok(TranscriptionOutput {
             text,
@@ -175,7 +201,7 @@ impl Transcriber {
             return Ok(None);
         };
 
-        let (text, _, _) = self.run_with_state(state.as_mut(), samples)?;
+        let (text, _, _) = self.run_with_state(state.as_mut(), samples, DecodePreset::Fast)?;
         Ok(Some(text))
     }
 
@@ -261,6 +287,7 @@ impl Transcriber {
         &self,
         state: &mut WhisperState,
         samples: &[f32],
+        preset: DecodePreset,
     ) -> Result<(String, Duration, Duration), String> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.config.n_threads);
@@ -270,10 +297,11 @@ impl Transcriber {
         params.set_print_timestamps(false);
         params.set_no_timestamps(self.config.no_timestamps);
         params.set_suppress_blank(true);
-        params.set_no_context(true);
-        params.set_single_segment(true);
+        params.set_suppress_nst(true);
+        params.set_no_context(matches!(preset, DecodePreset::Fast));
+        params.set_single_segment(matches!(preset, DecodePreset::Fast));
 
-        if let Some(audio_ctx) = self.selected_audio_ctx(samples) {
+        if let Some(audio_ctx) = self.selected_audio_ctx(samples, preset) {
             params.set_audio_ctx(audio_ctx);
         }
 
@@ -298,7 +326,11 @@ impl Transcriber {
         Ok((text.trim().to_string(), inference, extract_t0.elapsed()))
     }
 
-    fn selected_audio_ctx(&self, samples: &[f32]) -> Option<i32> {
+    fn selected_audio_ctx(&self, samples: &[f32], preset: DecodePreset) -> Option<i32> {
+        if matches!(preset, DecodePreset::Conservative) {
+            return None;
+        }
+
         match self.config.audio_ctx {
             AudioContextStrategy::Adaptive => Some(self.recommended_audio_ctx(samples)),
             AudioContextStrategy::Fixed(audio_ctx) => Some(audio_ctx),
@@ -329,5 +361,76 @@ fn yes_no(value: bool) -> &'static str {
         "yes"
     } else {
         "no"
+    }
+}
+
+fn transcript_looks_repetitive(text: &str) -> bool {
+    let tokens = normalized_tokens(text);
+    if tokens.len() < 8 {
+        return false;
+    }
+
+    has_adjacent_repeated_window(&tokens, 3)
+}
+
+fn normalized_tokens(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|token| {
+            let normalized = token
+                .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\'')
+                .to_ascii_lowercase();
+
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect()
+}
+
+fn has_adjacent_repeated_window(tokens: &[String], min_window: usize) -> bool {
+    for window in min_window..=tokens.len() / 2 {
+        for start in 0..=tokens.len() - window * 2 {
+            if tokens[start..start + window] == tokens[start + window..start + window * 2] {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repetition_detector_flags_repeated_phrase() {
+        let text =
+            "Okay, it also seems like there's a bug with the transcription. Okay, it also seems like there's a bug with the transcription.";
+
+        assert!(transcript_looks_repetitive(text));
+    }
+
+    #[test]
+    fn repetition_detector_flags_short_clause_repeat() {
+        let text = "This is broken this is broken right now.";
+
+        assert!(transcript_looks_repetitive(text));
+    }
+
+    #[test]
+    fn repetition_detector_ignores_normal_sentence() {
+        let text = "Okay, it also seems like there's a bug with the transcription.";
+
+        assert!(!transcript_looks_repetitive(text));
+    }
+
+    #[test]
+    fn repetition_detector_ignores_short_stutter() {
+        let text = "I think I think this is okay.";
+
+        assert!(!transcript_looks_repetitive(text));
     }
 }

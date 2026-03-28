@@ -1,6 +1,6 @@
 use crate::audio::{resample_to_target, TARGET_SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::Stream;
+use cpal::{BufferSize, Stream, SupportedBufferSize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,7 +69,7 @@ impl Recorder {
         let config = cpal::StreamConfig {
             channels,
             sample_rate: cpal::SampleRate(sample_rate),
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: preferred_input_buffer_size(default_config.buffer_size()),
         };
 
         let samples = self.samples.clone();
@@ -194,6 +194,13 @@ impl Recorder {
     }
 }
 
+fn preferred_input_buffer_size(supported: &SupportedBufferSize) -> BufferSize {
+    match supported {
+        SupportedBufferSize::Range { min, .. } => BufferSize::Fixed(*min),
+        SupportedBufferSize::Unknown => BufferSize::Default,
+    }
+}
+
 // SAFETY: Stream is Send but not Sync by default. We protect it with a Mutex.
 unsafe impl Send for Recorder {}
 unsafe impl Sync for Recorder {}
@@ -225,5 +232,20 @@ mod tests {
         let bins = recorder.latest_waveform(8);
         assert!(bins[..4].iter().all(|value| *value < 0.05));
         assert!(bins[4..].iter().any(|value| *value > 0.25));
+    }
+
+    #[test]
+    fn prefers_lowest_supported_input_buffer() {
+        let selected =
+            preferred_input_buffer_size(&SupportedBufferSize::Range { min: 128, max: 512 });
+
+        assert!(matches!(selected, BufferSize::Fixed(128)));
+    }
+
+    #[test]
+    fn keeps_default_buffer_when_range_is_unknown() {
+        let selected = preferred_input_buffer_size(&SupportedBufferSize::Unknown);
+
+        assert!(matches!(selected, BufferSize::Default));
     }
 }

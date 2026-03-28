@@ -6,26 +6,23 @@
 
 **The fastest free speech to text AI in the world.**
 
-Push-to-talk transcription for macOS. Hold a key, speak, release, and your text is pasted instantly.
+Push-to-talk transcription. Hold a key, speak, release, and your text is pasted instantly.
 
 [![Built with Rust](https://img.shields.io/badge/Built_with-Rust-B7410E?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Metal GPU](https://img.shields.io/badge/Metal-GPU_Accelerated-0071E3?style=for-the-badge&logo=apple&logoColor=white)](#speed-vs-the-competition)
+[![Metal GPU](https://img.shields.io/badge/Metal-GPU_Accelerated-0071E3?style=for-the-badge&logo=apple&logoColor=white)](#performance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge)](LICENSE)
 [![100% Offline](https://img.shields.io/badge/100%25-Offline-8B5CF6?style=for-the-badge&logo=shieldsdotio&logoColor=white)](#)
 
 </div>
 
-## Speed vs. the competition
+## What is it?
 
-| App | Latency | Source |
-|---|---|---|
-| **Screamer** | **`~52ms`** | Local `app_path_latency --dispatch-paste` benchmark on Apple M2 Max with `base.en` |
-| Dictato | `80ms` | [Dictato](https://dicta.to/) |
-| SuperWhisper | `~700ms` estimated | [Superwhisper](https://superwhisper.com/), [App Store](https://apps.apple.com/us/app/superwhisper/id6471464415?uo=4), [MacSources review](https://macsources.com/superwhisper-app-review/), [Declom review](https://declom.com/superwhisper/) |
-| Wispr Flow | `~600ms` estimated | [Wispr Flow](https://wisprflow.ai/), [App Store](https://apps.apple.com/us/app/wispr-flow-ai-voice-keyboard/id6497229487?uo=4), [Microsoft Store](https://apps.microsoft.com/detail/9n1b9jwb3m35), [AI Productivity Coach review](https://aiproductivitycoach.com/wispr-flow-review/), [Letterly review](https://letterly.app/blog/wispr-flow-review/) |
-| Otter.ai | `~1500ms` estimated | [Otter](https://otter.ai/), [App Store](https://apps.apple.com/us/app/otter-transcribe-voice-notes/id1276437113?uo=4) |
+Screamer is a free, open source, offline push-to-talk speech-to-text app for macOS.
 
-> Screamer's number is the median of the verified end-to-end app-path benchmark across the current phrase set (`32ms`, `52ms`, `68ms`). It includes stop, resample, transcription, clipboard write, and `Cmd+V` dispatch. Competitor numbers are public claims or rough public estimates as of March 27, 2026.
+- Hold a key, speak, release, and your text is pasted into the app you are using
+- Runs locally with Whisper, so there is no cloud round-trip
+- Shows a live overlay with waveform and rolling preview while you talk
+- Built for low-latency dictation instead of full meeting transcription
 
 ## How it works
 
@@ -38,7 +35,18 @@ Hold Left Control -> Speak -> See waveform + live text -> Release -> Text pastes
 - Final transcription and paste on release, so unstable partials are never typed into the target app
 - Free, offline, and open source
 
-## Accuracy
+## Performance
+
+### Screamer latency
+
+| Metric | Result |
+|---|---|
+| Median end-to-end app-path latency | **`~52ms`** |
+| Verified phrase-set results | `32ms`, `52ms`, `68ms` |
+| Benchmark path | Stop, resample, transcription, clipboard write, and `Cmd+V` dispatch |
+| Test setup | Apple M2 Max with `base.en` via local `app_path_latency --dispatch-paste` |
+
+### Screamer evals
 
 Screamer uses `whisper.cpp` via `whisper-rs`, so accuracy mainly depends on the model you choose.
 
@@ -51,6 +59,18 @@ Screamer uses `whisper.cpp` via `whisper-rs`, so accuracy mainly depends on the 
 | `large-v3` | ~2.5% | Highest accuracy |
 
 All models are free to download with `./download_model.sh`.
+
+### Speed vs. the competition
+
+| App | Latency | Source |
+|---|---|---|
+| **Screamer** | **`~52ms`** | Local `app_path_latency --dispatch-paste` benchmark on Apple M2 Max with `base.en` |
+| Dictato | `80ms` | [Dictato](https://dicta.to/) |
+| SuperWhisper | `~700ms` estimated | [Superwhisper](https://superwhisper.com/), [App Store](https://apps.apple.com/us/app/superwhisper/id6471464415?uo=4), [MacSources review](https://macsources.com/superwhisper-app-review/), [Declom review](https://declom.com/superwhisper/) |
+| Wispr Flow | `~600ms` estimated | [Wispr Flow](https://wisprflow.ai/), [App Store](https://apps.apple.com/us/app/wispr-flow-ai-voice-keyboard/id6497229487?uo=4), [Microsoft Store](https://apps.microsoft.com/detail/9n1b9jwb3m35), [AI Productivity Coach review](https://aiproductivitycoach.com/wispr-flow-review/), [Letterly review](https://letterly.app/blog/wispr-flow-review/) |
+| Otter.ai | `~1500ms` estimated | [Otter](https://otter.ai/), [App Store](https://apps.apple.com/us/app/otter-transcribe-voice-notes/id1276437113?uo=4) |
+
+> Screamer's number is the median of the verified end-to-end app-path benchmark across the current phrase set (`32ms`, `52ms`, `68ms`). Competitor numbers are public claims or rough public estimates as of March 27, 2026.
 
 ## Install
 

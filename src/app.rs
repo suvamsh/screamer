@@ -1,17 +1,19 @@
 use crate::config::{Config, HOTKEYS, MODELS, POSITIONS};
 use crate::overlay::{Overlay, WAVEFORM_BINS};
 use crate::recorder::Recorder;
+use crate::settings_window::SettingsWindow;
 use crate::sound::SoundPlayer;
 use crate::transcriber::Transcriber;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::sel;
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
 };
 use objc2_foundation::{MainThreadMarker, NSString};
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -28,6 +30,7 @@ const SPEECH_DETECTION_LOOKBACK_SAMPLES: usize = 16_000;
 const SPEECH_DETECTION_FRAME_SAMPLES: usize = 320;
 const SPEECH_DETECTION_FRAME_RMS_GATE: f32 = 0.006;
 const SPEECH_DETECTION_MIN_ACTIVE_FRAMES: usize = 3;
+const SPEECH_TRIM_PADDING_SAMPLES: usize = 1600;
 
 // Thread-local overlay reference so menu handlers can update position without relaunch.
 // Safe because all menu handlers and overlay access run on the main thread.
@@ -35,6 +38,8 @@ thread_local! {
     static OVERLAY: RefCell<Option<Rc<RefCell<Overlay>>>> = const { RefCell::new(None) };
     static LIVE_TRANSCRIPTION_ENABLED: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     static SOUND_EFFECTS_ENABLED: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    static SETTINGS_WINDOW: RefCell<Option<Rc<SettingsWindow>>> = const { RefCell::new(None) };
+    static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
 }
 
 pub struct App {
@@ -54,6 +59,54 @@ pub struct App {
 pub struct AppInitError {
     pub title: &'static str,
     pub message: String,
+}
+
+pub fn install_main_menu(mtm: MainThreadMarker, app: &NSApplication) {
+    let handler = get_menu_handler();
+
+    unsafe {
+        let main_menu = NSMenu::new(mtm);
+        let app_item = NSMenuItem::new(mtm);
+        app_item.setTitle(&NSString::from_str("Screamer"));
+
+        let app_menu = NSMenu::new(mtm);
+        app_menu.setTitle(&NSString::from_str("Screamer"));
+
+        let settings_item = NSMenuItem::new(mtm);
+        settings_item.setTitle(&NSString::from_str("Settings..."));
+        let _: () = msg_send![&*settings_item, setTarget: handler];
+        settings_item.setAction(Some(sel!(showSettings:)));
+        settings_item.setKeyEquivalent(&NSString::from_str(","));
+        app_menu.addItem(&settings_item);
+
+        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        let quit_item = NSMenuItem::new(mtm);
+        quit_item.setTitle(&NSString::from_str("Quit Screamer"));
+        quit_item.setAction(Some(sel!(terminate:)));
+        quit_item.setKeyEquivalent(&NSString::from_str("q"));
+        app_menu.addItem(&quit_item);
+
+        app_item.setSubmenu(Some(&app_menu));
+        main_menu.addItem(&app_item);
+        app.setMainMenu(Some(&main_menu));
+
+        let _: () = msg_send![app, setDelegate: handler];
+    }
+}
+
+pub fn show_settings_window() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+
+    let app = NSApplication::sharedApplication(mtm);
+    app.activate();
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(window) = cell.borrow().as_ref() {
+            window.show();
+        }
+    });
 }
 
 // ─── ObjC Menu Handler ───────────────────────────────────────────────────────
@@ -86,6 +139,35 @@ fn menu_handler_class() -> &'static AnyClass {
                 sel!(toggleSoundEffects:),
                 toggle_sound_effects_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
+            builder.add_method(
+                sel!(showSettings:),
+                show_settings_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(selectModelPopup:),
+                select_model_popup_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(selectHotkeyPopup:),
+                select_hotkey_popup_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(selectPositionPopup:),
+                select_position_popup_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(setLiveTranscriptionEnabled:),
+                set_live_transcription_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(setSoundEffectsEnabled:),
+                set_sound_effects_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+                application_should_handle_reopen
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
+            );
         }
 
         builder.register()
@@ -103,129 +185,96 @@ fn get_menu_handler() -> *const AnyObject {
 
 extern "C" fn select_model_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
     let tag: isize = unsafe { msg_send![sender, tag] };
-    if let Some(model_info) = MODELS.get(tag as usize) {
-        eprintln!("[screamer] Model selected: {}", model_info.id);
-
-        if Transcriber::find_model(model_info.id).is_none() {
-            eprintln!("[screamer] Model not found: {}", model_info.id);
-            if let Some(mtm) = MainThreadMarker::new() {
-                let alert = NSAlert::new(mtm);
-                alert.setAlertStyle(NSAlertStyle::Warning);
-                alert.setMessageText(&NSString::from_str("Model Not Downloaded"));
-                alert.setInformativeText(&NSString::from_str(&format!(
-                    "The {} model ({}) hasn't been downloaded yet.\n\n\
-                     Run this in Terminal:\n\
-                     cd {} && ./download_model.sh {}",
-                    model_info.label,
-                    model_info.size,
-                    std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                    model_info.id
-                )));
-                alert.runModal();
-            }
-            return;
-        }
-
-        let mut config = Config::load();
-        config.model = model_info.id.to_string();
-        config.save();
-        relaunch();
-    }
+    apply_model_selection(tag as usize);
 }
 
 extern "C" fn select_hotkey_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
     let tag: isize = unsafe { msg_send![sender, tag] };
-    if let Some(hotkey_info) = HOTKEYS.get(tag as usize) {
-        eprintln!("[screamer] Hotkey selected: {}", hotkey_info.id);
-        let mut config = Config::load();
-        config.hotkey = hotkey_info.id.to_string();
-        config.save();
-        relaunch();
-    }
+    apply_hotkey_selection(tag as usize);
 }
 
 extern "C" fn select_position_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
     let tag: isize = unsafe { msg_send![sender, tag] };
-    if let Some(pos_info) = POSITIONS.get(tag as usize) {
-        eprintln!("[screamer] Position selected: {}", pos_info.label);
-
-        let mut config = Config::load();
-        config.overlay_position = pos_info.id;
-        config.save();
-
-        // Apply immediately without relaunch
-        if let Some(mtm) = MainThreadMarker::new() {
-            OVERLAY.with(|cell| {
-                if let Some(overlay) = cell.borrow().as_ref() {
-                    if let Ok(mut ov) = overlay.try_borrow_mut() {
-                        ov.set_position(mtm, pos_info.id);
-                    }
-                }
-            });
-        }
-    }
+    apply_position_selection(tag as usize);
 }
 
 extern "C" fn toggle_live_transcription_action(
     _this: *mut AnyObject,
     _sel: Sel,
-    sender: *mut AnyObject,
+    _sender: *mut AnyObject,
 ) {
     let enabled = LIVE_TRANSCRIPTION_ENABLED.with(|cell| {
         let borrowed = cell.borrow();
         let flag = borrowed.as_ref()?;
-
-        let enabled = !flag.load(Ordering::Relaxed);
-        flag.store(enabled, Ordering::Relaxed);
-        Some(enabled)
+        Some(!flag.load(Ordering::Relaxed))
     });
-
     let Some(enabled) = enabled else {
         return;
     };
-
-    let mut config = Config::load();
-    config.live_transcription = enabled;
-    config.save();
-
-    let state = if enabled { 1isize } else { 0isize };
-    let _: () = unsafe { msg_send![sender, setState: state] };
-    eprintln!(
-        "[screamer] Live transcription {}",
-        if enabled { "enabled" } else { "disabled" }
-    );
+    set_live_transcription_enabled(enabled);
 }
 
 extern "C" fn toggle_sound_effects_action(
     _this: *mut AnyObject,
     _sel: Sel,
-    sender: *mut AnyObject,
+    _sender: *mut AnyObject,
 ) {
     let enabled = SOUND_EFFECTS_ENABLED.with(|cell| {
         let borrowed = cell.borrow();
         let flag = borrowed.as_ref()?;
-
-        let enabled = !flag.load(Ordering::Relaxed);
-        flag.store(enabled, Ordering::Relaxed);
-        Some(enabled)
+        Some(!flag.load(Ordering::Relaxed))
     });
-
     let Some(enabled) = enabled else {
         return;
     };
+    set_sound_effects_enabled(enabled);
+}
 
-    let mut config = Config::load();
-    config.sound_effects = enabled;
-    config.save();
+extern "C" fn show_settings_action(_this: *mut AnyObject, _sel: Sel, _sender: *mut AnyObject) {
+    show_settings_window();
+}
 
-    let state = if enabled { 1isize } else { 0isize };
-    let _: () = unsafe { msg_send![sender, setState: state] };
-    eprintln!(
-        "[screamer] Sound effects {}",
-        if enabled { "enabled" } else { "disabled" }
-    );
+extern "C" fn select_model_popup_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
+    let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+    apply_model_selection(index as usize);
+}
+
+extern "C" fn select_hotkey_popup_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
+    let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+    apply_hotkey_selection(index as usize);
+}
+
+extern "C" fn select_position_popup_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    sender: *mut AnyObject,
+) {
+    let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+    apply_position_selection(index as usize);
+}
+
+extern "C" fn set_live_transcription_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    sender: *mut AnyObject,
+) {
+    let state: isize = unsafe { msg_send![sender, state] };
+    set_live_transcription_enabled(state != 0);
+}
+
+extern "C" fn set_sound_effects_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
+    let state: isize = unsafe { msg_send![sender, state] };
+    set_sound_effects_enabled(state != 0);
+}
+
+extern "C" fn application_should_handle_reopen(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    _sender: *mut AnyObject,
+    _has_visible_windows: Bool,
+) -> Bool {
+    show_settings_window();
+    Bool::YES
 }
 
 fn relaunch() {
@@ -255,6 +304,165 @@ fn relaunch() {
     if let Some(mtm) = MainThreadMarker::new() {
         let app = NSApplication::sharedApplication(mtm);
         app.terminate(None);
+    }
+}
+
+fn apply_model_selection(index: usize) {
+    let Some(model_info) = MODELS.get(index) else {
+        sync_settings_window(&Config::load());
+        return;
+    };
+
+    eprintln!("[screamer] Model selected: {}", model_info.id);
+    if Transcriber::find_model(model_info.id).is_none() {
+        eprintln!("[screamer] Model not found: {}", model_info.id);
+        show_missing_model_alert(model_info.label, model_info.size, model_info.id);
+        sync_settings_window(&Config::load());
+        return;
+    }
+
+    let mut config = Config::load();
+    config.model = model_info.id.to_string();
+    config.save();
+    relaunch();
+}
+
+fn apply_hotkey_selection(index: usize) {
+    let Some(hotkey_info) = HOTKEYS.get(index) else {
+        sync_settings_window(&Config::load());
+        return;
+    };
+
+    eprintln!("[screamer] Hotkey selected: {}", hotkey_info.id);
+    let mut config = Config::load();
+    config.hotkey = hotkey_info.id.to_string();
+    config.save();
+    relaunch();
+}
+
+fn apply_position_selection(index: usize) {
+    let Some(pos_info) = POSITIONS.get(index) else {
+        sync_settings_window(&Config::load());
+        return;
+    };
+
+    eprintln!("[screamer] Position selected: {}", pos_info.label);
+    let mut config = Config::load();
+    config.overlay_position = pos_info.id;
+    config.save();
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        OVERLAY.with(|cell| {
+            if let Some(overlay) = cell.borrow().as_ref() {
+                if let Ok(mut ov) = overlay.try_borrow_mut() {
+                    ov.set_position(mtm, pos_info.id);
+                }
+            }
+        });
+        rebuild_status_menu(mtm);
+    }
+    sync_settings_window(&config);
+}
+
+fn set_live_transcription_enabled(enabled: bool) {
+    LIVE_TRANSCRIPTION_ENABLED.with(|cell| {
+        if let Some(flag) = cell.borrow().as_ref() {
+            flag.store(enabled, Ordering::Relaxed);
+        }
+    });
+
+    let mut config = Config::load();
+    config.live_transcription = enabled;
+    config.save();
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        rebuild_status_menu(mtm);
+    }
+    sync_settings_window(&config);
+    eprintln!(
+        "[screamer] Live transcription {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+}
+
+fn set_sound_effects_enabled(enabled: bool) {
+    SOUND_EFFECTS_ENABLED.with(|cell| {
+        if let Some(flag) = cell.borrow().as_ref() {
+            flag.store(enabled, Ordering::Relaxed);
+        }
+    });
+
+    let mut config = Config::load();
+    config.sound_effects = enabled;
+    config.save();
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        rebuild_status_menu(mtm);
+    }
+    sync_settings_window(&config);
+    eprintln!(
+        "[screamer] Sound effects {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+}
+
+fn sync_settings_window(config: &Config) {
+    SETTINGS_WINDOW.with(|cell| {
+        if let Some(window) = cell.borrow().as_ref() {
+            window.sync(config);
+        }
+    });
+}
+
+fn rebuild_status_menu(mtm: MainThreadMarker) {
+    let config = Config::load();
+    STATUS_ITEM.with(|cell| {
+        if let Some(status_item) = cell.borrow().as_ref() {
+            let menu = App::build_menu(mtm, &config);
+            status_item.setMenu(Some(&menu));
+        }
+    });
+}
+
+fn show_missing_model_alert(label: &str, size: &str, id: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&NSString::from_str("Model Not Downloaded"));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "The {} model ({}) hasn't been downloaded yet.\n\n\
+         Run this in Terminal:\n\
+         cd {} && ./download_model.sh {}",
+        label,
+        size,
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        id
+    )));
+    alert.runModal();
+}
+
+fn menu_model_title(id: &str) -> String {
+    if let Some(model) = MODELS.iter().find(|model| model.id == id) {
+        model.label.to_string()
+    } else {
+        id.to_string()
+    }
+}
+
+fn selectable_model_title(id: &str) -> String {
+    let Some(model) = MODELS.iter().find(|model| model.id == id) else {
+        return id.to_string();
+    };
+
+    if Transcriber::find_model(model.id).is_some() {
+        format!("{} ({})", model.label, model.size)
+    } else {
+        format!("{} ({}) — Not Downloaded", model.label, model.size)
     }
 }
 
@@ -335,6 +543,15 @@ impl App {
             }
         }
 
+        STATUS_ITEM.with(|cell| {
+            *cell.borrow_mut() = Some(status_item.clone());
+        });
+
+        let settings_window = SettingsWindow::new(mtm, &config, get_menu_handler());
+        SETTINGS_WINDOW.with(|cell| {
+            *cell.borrow_mut() = Some(settings_window);
+        });
+
         let menu = Self::build_menu(mtm, &config);
         status_item.setMenu(Some(&menu));
 
@@ -364,25 +581,26 @@ impl App {
             status_line.setEnabled(false);
             menu.addItem(&status_line);
 
+            let open_item = NSMenuItem::new(mtm);
+            open_item.setTitle(&NSString::from_str("Open Screamer"));
+            let _: () = msg_send![&*open_item, setTarget: handler];
+            open_item.setAction(Some(sel!(showSettings:)));
+            menu.addItem(&open_item);
+
             menu.addItem(&NSMenuItem::separatorItem(mtm));
 
             // ── Model submenu ──
             let model_item = NSMenuItem::new(mtm);
-            model_item.setTitle(&NSString::from_str(&format!("Model: {}", config.model)));
+            model_item.setTitle(&NSString::from_str(&format!(
+                "Model: {}",
+                menu_model_title(&config.model)
+            )));
             let model_submenu = NSMenu::new(mtm);
             model_submenu.setTitle(&NSString::from_str("Model"));
 
             for (i, model_info) in MODELS.iter().enumerate() {
                 let item = NSMenuItem::new(mtm);
-                let available = Transcriber::find_model(model_info.id).is_some();
-                let title = if available {
-                    format!("{} ({})", model_info.label, model_info.size)
-                } else {
-                    format!(
-                        "{} ({}) — Not Downloaded",
-                        model_info.label, model_info.size
-                    )
-                };
+                let title = selectable_model_title(model_info.id);
                 item.setTitle(&NSString::from_str(&title));
                 item.setTag(i as isize);
                 let _: () = msg_send![&*item, setTarget: handler];
@@ -570,20 +788,32 @@ impl App {
                     }
                     eprintln!("[screamer] Recording stopped, {} samples", samples.len());
 
-                    if samples.len() < 4800 {
-                        eprintln!("[screamer] Recording too short, skipping");
+                    let Some(transcribe_range) = trimmed_speech_range(&samples) else {
+                        eprintln!("[screamer] Recording was silence, skipping transcription");
+                        if sound_effects_enabled_release.load(Ordering::Relaxed) {
+                            pending_completion_sound_release.store(true, Ordering::SeqCst);
+                        }
+                        return;
+                    };
+
+                    let trimmed_len = transcribe_range.end - transcribe_range.start;
+                    if trimmed_len < 4800 {
+                        eprintln!(
+                            "[screamer] Recording too short after trimming silence ({} samples), skipping",
+                            trimmed_len
+                        );
                         if sound_effects_enabled_release.load(Ordering::Relaxed) {
                             pending_completion_sound_release.store(true, Ordering::SeqCst);
                         }
                         return;
                     }
 
-                    if !samples_contain_speech(&samples) {
-                        eprintln!("[screamer] Recording was silence, skipping transcription");
-                        if sound_effects_enabled_release.load(Ordering::Relaxed) {
-                            pending_completion_sound_release.store(true, Ordering::SeqCst);
-                        }
-                        return;
+                    if trimmed_len != samples.len() {
+                        eprintln!(
+                            "[screamer] Trimmed silence: {} -> {} samples",
+                            samples.len(),
+                            trimmed_len
+                        );
                     }
 
                     let t = trans_release.clone();
@@ -591,7 +821,7 @@ impl App {
                     let sound_effects_enabled = sound_effects_enabled_release.clone();
                     let stop_ms = release_t0.elapsed().as_millis();
                     std::thread::spawn(move || {
-                        match t.transcribe_profiled(&samples) {
+                        match t.transcribe_profiled(&samples[transcribe_range]) {
                             Ok(result) if !result.text.is_empty() => {
                                 eprintln!(
                                     "[screamer] Transcribed in {}ms: {}",
@@ -834,18 +1064,38 @@ fn recent_speech_window(samples: &[f32]) -> &[f32] {
 }
 
 fn samples_contain_speech(samples: &[f32]) -> bool {
+    speech_activity_bounds(samples).is_some()
+}
+
+fn trimmed_speech_range(samples: &[f32]) -> Option<Range<usize>> {
+    let (start, end) = speech_activity_bounds(samples)?;
+    Some(
+        start.saturating_sub(SPEECH_TRIM_PADDING_SAMPLES)
+            ..(end + SPEECH_TRIM_PADDING_SAMPLES).min(samples.len()),
+    )
+}
+
+fn speech_activity_bounds(samples: &[f32]) -> Option<(usize, usize)> {
+    let mut first_active = None;
+    let mut last_active_end = 0usize;
     let mut active_frames = 0usize;
 
-    for frame in samples.chunks(SPEECH_DETECTION_FRAME_SAMPLES) {
-        if frame_rms(frame) >= SPEECH_DETECTION_FRAME_RMS_GATE {
-            active_frames += 1;
-            if active_frames >= SPEECH_DETECTION_MIN_ACTIVE_FRAMES {
-                return true;
-            }
+    for (frame_idx, frame) in samples.chunks(SPEECH_DETECTION_FRAME_SAMPLES).enumerate() {
+        if frame_rms(frame) < SPEECH_DETECTION_FRAME_RMS_GATE {
+            continue;
         }
+
+        active_frames += 1;
+        let frame_start = frame_idx * SPEECH_DETECTION_FRAME_SAMPLES;
+        first_active.get_or_insert(frame_start);
+        last_active_end = frame_start + frame.len();
     }
 
-    false
+    if active_frames < SPEECH_DETECTION_MIN_ACTIVE_FRAMES {
+        return None;
+    }
+
+    Some((first_active.unwrap_or(0), last_active_end))
 }
 
 fn frame_rms(frame: &[f32]) -> f32 {
@@ -919,5 +1169,24 @@ mod tests {
         let samples =
             vec![0.02; SPEECH_DETECTION_FRAME_SAMPLES * SPEECH_DETECTION_MIN_ACTIVE_FRAMES];
         assert!(samples_contain_speech(&samples));
+    }
+
+    #[test]
+    fn trimmed_speech_range_drops_outer_silence_with_padding() {
+        let mut samples = vec![0.0; SPEECH_DETECTION_FRAME_SAMPLES * 10];
+        samples.extend(vec![0.02; SPEECH_DETECTION_FRAME_SAMPLES * 6]);
+        samples.extend(vec![0.0; SPEECH_DETECTION_FRAME_SAMPLES * 8]);
+
+        let range = trimmed_speech_range(&samples).expect("speech should be detected");
+
+        assert_eq!(range.start, 1600);
+        assert_eq!(range.end, 6720);
+    }
+
+    #[test]
+    fn trimmed_speech_range_returns_none_without_sustained_speech() {
+        let samples = vec![0.02; SPEECH_DETECTION_FRAME_SAMPLES * 2];
+
+        assert!(trimmed_speech_range(&samples).is_none());
     }
 }
