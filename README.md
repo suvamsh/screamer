@@ -53,6 +53,14 @@ Hold Left Control -> Speak -> See waveform + live text -> Release -> Text pastes
 | Verification harness | `./verify_latency.sh` running `app_path_latency --dispatch-paste` on the current synthetic phrase set |
 | Test setup | Apple M2 Max with `base.en` |
 
+### Under the hood
+
+- Two pre-warmed Whisper states stay ready in memory: one for final transcription and one for live preview, so release-time transcription does not have to build a fresh state.
+- Adaptive audio context keeps short dictation fast by shrinking Whisper's work to match the utterance instead of always using the model's full default window.
+- The decode path is tuned for push-to-talk, not long recordings: no timestamps, single-segment output, no rolling context, and a fast greedy decode.
+- Live preview is best-effort and never types into your app. Only the final transcript is pasted, which lets Screamer drop stale preview work instead of slowing down the critical path.
+- Silence is trimmed before inference, and the recorder keeps latency low with preallocated buffers, small input buffers, and a lightweight paste dispatch.
+
 ### Model guidance
 
 Screamer does not yet ship a Screamer-specific WER harness in this repo. Accuracy mainly follows the underlying Whisper model, so treat these as relative model tradeoffs rather than audited Screamer eval numbers.
