@@ -741,6 +741,22 @@ impl App {
         };
 
         log::info!("Transcriber runtime: {}", transcriber.runtime_summary());
+        match transcriber.warm_up(config.live_transcription) {
+            Ok(duration) => {
+                log::info!(
+                    "Transcriber warmup completed in {}ms (live_preview={})",
+                    duration.as_millis(),
+                    if config.live_transcription {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+            }
+            Err(err) => {
+                eprintln!("[screamer] Warmup failed, continuing without it: {err}");
+            }
+        }
         log::info!("Model loaded successfully");
 
         Ok(transcriber)

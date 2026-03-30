@@ -9,6 +9,7 @@ use whisper_rs::{
 
 const AUDIO_CTX_SAMPLES_PER_UNIT: usize = 320;
 const AUDIO_CTX_GRANULARITY: i32 = 64;
+const WARMUP_SAMPLES: usize = 16_000;
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum AudioContextStrategy {
@@ -154,6 +155,30 @@ impl Transcriber {
     #[allow(dead_code)]
     pub fn transcribe(&self, samples: &[f32]) -> Result<String, String> {
         self.transcribe_profiled(samples).map(|result| result.text)
+    }
+
+    pub fn warm_up(&self, include_live_preview: bool) -> Result<Duration, String> {
+        let samples = vec![0.0; WARMUP_SAMPLES];
+        let warmup_t0 = Instant::now();
+
+        {
+            let mut state = self.acquire_final_state()?;
+            let _ = self.run_with_state(state.as_mut(), &samples, DecodePreset::Fast)?;
+        }
+
+        if include_live_preview {
+            if let Some(state) = &self.live_state {
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let _ = self.run_with_state(&mut state, &samples, DecodePreset::Fast)?;
+            } else {
+                let mut state = self.create_state()?;
+                let _ = self.run_with_state(&mut state, &samples, DecodePreset::Fast)?;
+            }
+        }
+
+        Ok(warmup_t0.elapsed())
     }
 
     pub fn transcribe_profiled(&self, samples: &[f32]) -> Result<TranscriptionOutput, String> {
