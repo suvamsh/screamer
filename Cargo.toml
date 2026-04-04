@@ -10,11 +10,19 @@ homepage = "https://github.com/suvamsh/screamer"
 rust-version = "1.94"
 publish = false
 
+[workspace]
+members = [
+    ".",
+    "crates/screamer-core",
+    "crates/screamer-models",
+    "crates/screamer-whisper",
+]
+
 [dependencies]
-whisper-rs = { version = "0.14", features = ["metal"] }
 cpal = "0.15"
 objc2 = "0.6"
 block2 = "0.6"
+whisper-rs = { version = "0.14", features = ["metal"] }
 objc2-foundation = { version = "0.3", features = [
     "NSDate",
     "NSString",
@@ -73,6 +81,9 @@ objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 core-graphics = "0.24"
 core-foundation = "0.10"
 arboard = "3"
+screamer-core = { path = "crates/screamer-core" }
+screamer-models = { path = "crates/screamer-models" }
+screamer-whisper = { path = "crates/screamer-whisper" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"

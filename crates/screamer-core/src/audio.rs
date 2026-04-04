@@ -1,6 +1,6 @@
-pub(crate) const TARGET_SAMPLE_RATE: u32 = 16_000;
+pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
-pub(crate) fn resample_to_target(input: &[f32], from_rate: u32) -> Vec<f32> {
+pub fn resample_to_target(input: &[f32], from_rate: u32) -> Vec<f32> {
     resample(input, from_rate, TARGET_SAMPLE_RATE)
 }
 

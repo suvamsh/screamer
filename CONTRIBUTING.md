@@ -23,7 +23,14 @@ Run the usual checks before opening a PR:
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo test --workspace --all-targets
+```
+
+When a change could affect the existing macOS app shell, also run the bundle smoke test:
+
+```bash
+GGML_NATIVE=OFF cargo build --release
+BIN_PATH=target/release/screamer ./scripts/macos_bundle_smoke.sh
 ```
 
 To build the app bundle locally:
@@ -46,6 +53,7 @@ open Screamer.app
 
 - Include a short summary of the user-visible change.
 - Mention any macOS permissions affected by the change.
+- Call out whether the macOS bundle smoke test still passed if you touched build, packaging, resources, permissions, hotkeys, paste behavior, or UI shell code.
 - Call out any manual verification you performed, especially for audio capture, hotkeys, paste behavior, or signing/notarization flows.
 
 ## Security issues

@@ -1,11 +1,8 @@
 mod app;
-mod audio;
 mod config;
-mod hardware;
 mod hotkey;
 mod loading;
 mod logging;
-mod model_paths;
 mod overlay;
 mod paster;
 mod permission_window;
@@ -14,7 +11,6 @@ mod recorder;
 mod settings_window;
 mod sound;
 mod theme;
-mod transcriber;
 
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;

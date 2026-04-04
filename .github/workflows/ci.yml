@@ -36,7 +36,43 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --workspace --all-targets
+
+  macos-bundle-smoke:
+    runs-on: macos-14
+    env:
+      CARGO_TERM_COLOR: always
+      GGML_NATIVE: OFF
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: brew install cmake
+
+      - name: Build universal macOS binary
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin -p screamer
+          cargo build --locked --release --target x86_64-apple-darwin -p screamer
+          mkdir -p target/universal/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/screamer \
+            target/x86_64-apple-darwin/release/screamer \
+            -output target/universal/release/screamer
+          lipo -info target/universal/release/screamer
+
+      - name: Smoke test macOS app bundle
+        env:
+          BIN_PATH: target/universal/release/screamer
+        run: ./scripts/macos_bundle_smoke.sh

@@ -1,0 +1,15 @@
+[package]
+name = "screamer-whisper"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "screamer_whisper"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+screamer-models = { path = "../screamer-models" }
+whisper-rs = { version = "0.14", features = ["metal"] }

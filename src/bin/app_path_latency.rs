@@ -1,27 +1,14 @@
-#[path = "../audio.rs"]
-mod audio;
-
 #[path = "../bench_support.rs"]
 mod bench_support;
 
-#[path = "../hardware.rs"]
-mod hardware;
-
-#[path = "../model_paths.rs"]
-mod model_paths;
-
+use bench_support::{read_f32le_file, sample_label, Stats};
 #[path = "../paster.rs"]
 mod paster;
-
-#[allow(dead_code)]
-#[path = "../transcriber.rs"]
-mod transcriber;
-
-use bench_support::{read_f32le_file, sample_label, Stats};
+use screamer_core::audio;
+use screamer_whisper::Transcriber;
 use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
-use transcriber::Transcriber;
 
 struct Cli {
     model: String,
