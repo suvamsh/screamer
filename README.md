@@ -32,6 +32,7 @@ Project docs:
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 - [Release guide](docs/releases.md)
+- [SDK refactor plan](docs/sdk-refactor-plan.md)
 
 ## How it works
 

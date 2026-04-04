@@ -1,14 +1,9 @@
 #[path = "../bench_support.rs"]
 mod bench_support;
 
-#[path = "../hardware.rs"]
-mod hardware;
-
-#[path = "../model_paths.rs"]
-mod model_paths;
-
 use bench_support::{read_f32le_file, sample_label, Stats};
-use hardware::{ComputeBackendPreference, MachineProfile, RuntimeTuning};
+use screamer_models::find_model;
+use screamer_whisper::{ComputeBackendPreference, MachineProfile, RuntimeTuning};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -36,8 +31,8 @@ struct SampleResult {
 
 fn main() -> Result<(), String> {
     let cli = parse_args(env::args().skip(1))?;
-    let model_path = model_paths::find_model(&cli.model)
-        .ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
+    let model_path =
+        find_model(&cli.model).ok_or_else(|| format!("Could not find model '{}'", cli.model))?;
     let machine = MachineProfile::detect();
     let tuning = machine.recommended_tuning();
     let (ctx, backend_name) = create_context(&model_path, &machine, &tuning)?;

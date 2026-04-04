@@ -7,7 +7,6 @@ use crate::recorder::Recorder;
 use crate::settings_window::SettingsWindow;
 use crate::sound::SoundPlayer;
 use crate::theme;
-use crate::transcriber::Transcriber;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -16,34 +15,18 @@ use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
 };
 use objc2_foundation::{MainThreadMarker, NSString};
+use screamer_core::session::{
+    prepare_final_transcription, FinalSpeechWindowKind, FinalTranscriptionAction,
+    LivePreviewAction, LivePreviewState, LIVE_TRANSCRIPTION_INTERVAL,
+};
+use screamer_whisper::Transcriber;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
-
-const LIVE_TRANSCRIPTION_INTERVAL: Duration = Duration::from_millis(350);
-const LIVE_TRANSCRIPTION_MIN_SAMPLES: usize = 9600;
-const LIVE_TRANSCRIPTION_MIN_DELTA: usize = 2400;
-const LIVE_TRANSCRIPTION_MAX_SAMPLES: usize = 192_000;
-const LIVE_TRANSCRIPTION_PADDING_SAMPLES: usize = 8000;
-const LIVE_TRANSCRIPT_MAX_CHARS: usize = 180;
-const SPEECH_DETECTION_LOOKBACK_SAMPLES: usize = 16_000;
-const SPEECH_DETECTION_FRAME_SAMPLES: usize = 320;
-const SPEECH_DETECTION_FRAME_RMS_GATE: f32 = 0.006;
-const SPEECH_DETECTION_MIN_ACTIVE_FRAMES: usize = 3;
-const SPEECH_TRIM_PADDING_SAMPLES: usize = 1600;
-const FINAL_TRANSCRIPTION_MIN_SAMPLES: usize = 1600;
-const SHORT_UTTERANCE_FINAL_MIN_SAMPLES: usize =
-    SPEECH_DETECTION_FRAME_SAMPLES * SHORT_UTTERANCE_MIN_ACTIVE_FRAMES;
-const SHORT_UTTERANCE_MAX_SAMPLES: usize = 12_800;
-const SHORT_UTTERANCE_FRAME_RMS_GATE: f32 = 0.004;
-const SHORT_UTTERANCE_MIN_ACTIVE_FRAMES: usize = 2;
-const SHORT_UTTERANCE_MIN_PEAK: f32 = 0.02;
 const RELAUNCH_DELAY_SECONDS: &str = "0.5";
 const RELAUNCH_SHELL: &str = "/bin/sh";
 const OPEN_COMMAND: &str = "/usr/bin/open";
@@ -67,23 +50,6 @@ thread_local! {
 }
 
 static MICROPHONE_PERMISSION_GUIDANCE_SHOWN: AtomicBool = AtomicBool::new(false);
-
-#[derive(Clone, Copy)]
-struct SpeechDetectionConfig {
-    frame_rms_gate: f32,
-    min_active_frames: usize,
-}
-
-#[derive(Clone, Copy)]
-enum FinalSpeechWindowKind {
-    Standard,
-    ShortUtterance,
-}
-
-struct FinalSpeechWindow {
-    range: Range<usize>,
-    kind: FinalSpeechWindowKind,
-}
 
 pub struct App {
     _status_item: Retained<NSStatusItem>,
@@ -1079,41 +1045,42 @@ impl App {
                     }
                     eprintln!("[screamer] Recording stopped, {} samples", samples.len());
 
-                    let Some(transcribe_window) = final_transcription_window(&samples) else {
-                        eprintln!("[screamer] Recording was silence, skipping transcription");
-                        if sound_effects_enabled_release.load(Ordering::Relaxed) {
-                            pending_completion_sound_release.store(true, Ordering::SeqCst);
+                    let transcribe_window = match prepare_final_transcription(&samples) {
+                        FinalTranscriptionAction::SkipSilence => {
+                            eprintln!("[screamer] Recording was silence, skipping transcription");
+                            if sound_effects_enabled_release.load(Ordering::Relaxed) {
+                                pending_completion_sound_release.store(true, Ordering::SeqCst);
+                            }
+                            return;
                         }
-                        return;
+                        FinalTranscriptionAction::SkipTooShort { trimmed_len } => {
+                            eprintln!(
+                                "[screamer] Recording too short after trimming silence ({} samples), skipping",
+                                trimmed_len
+                            );
+                            if sound_effects_enabled_release.load(Ordering::Relaxed) {
+                                pending_completion_sound_release.store(true, Ordering::SeqCst);
+                            }
+                            return;
+                        }
+                        FinalTranscriptionAction::Ready(window) => {
+                            let trimmed_len = window.range.end - window.range.start;
+                            if trimmed_len != samples.len() {
+                                eprintln!(
+                                    "[screamer] Trimmed silence: {} -> {} samples",
+                                    samples.len(),
+                                    trimmed_len
+                                );
+                            }
+                            if matches!(window.kind, FinalSpeechWindowKind::ShortUtterance) {
+                                eprintln!(
+                                    "[screamer] Salvaging brief utterance with relaxed speech gate ({} samples)",
+                                    trimmed_len
+                                );
+                            }
+                            window
+                        }
                     };
-
-                    let trimmed_len = transcribe_window.range.end - transcribe_window.range.start;
-                    let min_required =
-                        minimum_final_transcription_samples(transcribe_window.kind);
-                    if trimmed_len < min_required {
-                        eprintln!(
-                            "[screamer] Recording too short after trimming silence ({} samples), skipping",
-                            trimmed_len
-                        );
-                        if sound_effects_enabled_release.load(Ordering::Relaxed) {
-                            pending_completion_sound_release.store(true, Ordering::SeqCst);
-                        }
-                        return;
-                    }
-
-                    if trimmed_len != samples.len() {
-                        eprintln!(
-                            "[screamer] Trimmed silence: {} -> {} samples",
-                            samples.len(),
-                            trimmed_len
-                        );
-                    }
-                    if matches!(transcribe_window.kind, FinalSpeechWindowKind::ShortUtterance) {
-                        eprintln!(
-                            "[screamer] Salvaging brief utterance with relaxed speech gate ({} samples)",
-                            trimmed_len
-                        );
-                    }
 
                     let t = trans_release.clone();
                     let pending_completion_sound = pending_completion_sound_release.clone();
@@ -1304,8 +1271,7 @@ fn spawn_live_transcription_worker(
     session: u64,
 ) {
     std::thread::spawn(move || {
-        let mut last_transcribed_samples = 0usize;
-        let mut last_text = String::new();
+        let mut preview_state = LivePreviewState::new();
 
         while is_recording.load(Ordering::Relaxed)
             && recording_session.load(Ordering::Relaxed) == session
@@ -1322,37 +1288,33 @@ fn spawn_live_transcription_worker(
                 if let Ok(mut transcript) = live_transcript.lock() {
                     transcript.clear();
                 }
+                preview_state.clear();
                 continue;
             }
 
             let samples = recorder.snapshot();
-            if samples.len() < LIVE_TRANSCRIPTION_MIN_SAMPLES {
-                continue;
-            }
-
-            if samples.len().saturating_sub(last_transcribed_samples) < LIVE_TRANSCRIPTION_MIN_DELTA
-            {
-                continue;
-            }
-
-            if !samples_contain_speech(recent_speech_window(&samples)) {
-                if let Ok(mut transcript) = live_transcript.lock() {
-                    transcript.clear();
+            let (padded_samples, observed_samples_len) = match preview_state.next_action(&samples) {
+                LivePreviewAction::Skip => continue,
+                LivePreviewAction::Clear => {
+                    if let Ok(mut transcript) = live_transcript.lock() {
+                        transcript.clear();
+                    }
+                    preview_state.clear();
+                    continue;
                 }
-                last_text.clear();
-                continue;
-            }
-
-            let padded_samples = padded_live_samples(&samples);
+                LivePreviewAction::Transcribe {
+                    padded_samples,
+                    observed_samples_len,
+                } => (padded_samples, observed_samples_len),
+            };
 
             match transcriber.try_transcribe(&padded_samples) {
                 Ok(Some(text)) => {
-                    last_transcribed_samples = samples.len();
-                    let display_text = format_live_transcript(&text);
-
-                    if display_text.is_empty() || display_text == last_text {
+                    let Some(display_text) =
+                        preview_state.register_transcription(observed_samples_len, &text)
+                    else {
                         continue;
-                    }
+                    };
 
                     if !is_recording.load(Ordering::Relaxed)
                         || recording_session.load(Ordering::Relaxed) != session
@@ -1365,7 +1327,6 @@ fn spawn_live_transcription_worker(
                         transcript.push_str(&display_text);
                     }
                     logging::log_transcript("Live partial", &display_text);
-                    last_text = display_text;
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -1374,150 +1335,6 @@ fn spawn_live_transcription_worker(
             }
         }
     });
-}
-
-fn padded_live_samples(samples: &[f32]) -> Vec<f32> {
-    let samples = live_preview_window(samples);
-    let mut padded = Vec::with_capacity(samples.len() + LIVE_TRANSCRIPTION_PADDING_SAMPLES);
-    padded.extend_from_slice(samples);
-    padded.resize(samples.len() + LIVE_TRANSCRIPTION_PADDING_SAMPLES, 0.0);
-    padded
-}
-
-fn live_preview_window(samples: &[f32]) -> &[f32] {
-    let start = samples.len().saturating_sub(LIVE_TRANSCRIPTION_MAX_SAMPLES);
-    &samples[start..]
-}
-
-fn recent_speech_window(samples: &[f32]) -> &[f32] {
-    let start = samples
-        .len()
-        .saturating_sub(SPEECH_DETECTION_LOOKBACK_SAMPLES);
-    &samples[start..]
-}
-
-fn samples_contain_speech(samples: &[f32]) -> bool {
-    speech_activity_bounds(samples).is_some()
-}
-
-fn final_transcription_window(samples: &[f32]) -> Option<FinalSpeechWindow> {
-    if let Some((start, end)) = speech_activity_bounds(samples) {
-        let range = padded_speech_range(samples.len(), start, end);
-        if range.end.saturating_sub(range.start)
-            >= minimum_final_transcription_samples(FinalSpeechWindowKind::Standard)
-        {
-            return Some(FinalSpeechWindow {
-                range,
-                kind: FinalSpeechWindowKind::Standard,
-            });
-        }
-    }
-
-    if samples.len() > SHORT_UTTERANCE_MAX_SAMPLES {
-        return None;
-    }
-
-    let short_config = SpeechDetectionConfig {
-        frame_rms_gate: SHORT_UTTERANCE_FRAME_RMS_GATE,
-        min_active_frames: SHORT_UTTERANCE_MIN_ACTIVE_FRAMES,
-    };
-    let (start, end) = speech_activity_bounds_with_config(samples, short_config)?;
-    let range = padded_speech_range(samples.len(), start, end);
-    if range.end.saturating_sub(range.start)
-        < minimum_final_transcription_samples(FinalSpeechWindowKind::ShortUtterance)
-    {
-        return None;
-    }
-    if max_abs_sample(&samples[range.clone()]) < SHORT_UTTERANCE_MIN_PEAK {
-        return None;
-    }
-
-    Some(FinalSpeechWindow {
-        range,
-        kind: FinalSpeechWindowKind::ShortUtterance,
-    })
-}
-
-fn speech_activity_bounds(samples: &[f32]) -> Option<(usize, usize)> {
-    speech_activity_bounds_with_config(
-        samples,
-        SpeechDetectionConfig {
-            frame_rms_gate: SPEECH_DETECTION_FRAME_RMS_GATE,
-            min_active_frames: SPEECH_DETECTION_MIN_ACTIVE_FRAMES,
-        },
-    )
-}
-
-fn speech_activity_bounds_with_config(
-    samples: &[f32],
-    config: SpeechDetectionConfig,
-) -> Option<(usize, usize)> {
-    let mut first_active = None;
-    let mut last_active_end = 0usize;
-    let mut active_frames = 0usize;
-
-    for (frame_idx, frame) in samples.chunks(SPEECH_DETECTION_FRAME_SAMPLES).enumerate() {
-        if frame_rms(frame) < config.frame_rms_gate {
-            continue;
-        }
-
-        active_frames += 1;
-        let frame_start = frame_idx * SPEECH_DETECTION_FRAME_SAMPLES;
-        first_active.get_or_insert(frame_start);
-        last_active_end = frame_start + frame.len();
-    }
-
-    if active_frames < config.min_active_frames {
-        return None;
-    }
-
-    Some((first_active.unwrap_or(0), last_active_end))
-}
-
-fn padded_speech_range(total_len: usize, start: usize, end: usize) -> Range<usize> {
-    start.saturating_sub(SPEECH_TRIM_PADDING_SAMPLES)
-        ..(end + SPEECH_TRIM_PADDING_SAMPLES).min(total_len)
-}
-
-fn minimum_final_transcription_samples(kind: FinalSpeechWindowKind) -> usize {
-    match kind {
-        FinalSpeechWindowKind::Standard => FINAL_TRANSCRIPTION_MIN_SAMPLES,
-        FinalSpeechWindowKind::ShortUtterance => SHORT_UTTERANCE_FINAL_MIN_SAMPLES,
-    }
-}
-
-fn max_abs_sample(samples: &[f32]) -> f32 {
-    samples
-        .iter()
-        .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
-}
-
-fn frame_rms(frame: &[f32]) -> f32 {
-    if frame.is_empty() {
-        return 0.0;
-    }
-
-    (frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32).sqrt()
-}
-
-fn format_live_transcript(text: &str) -> String {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let total_chars = trimmed.chars().count();
-    if total_chars <= LIVE_TRANSCRIPT_MAX_CHARS {
-        return trimmed.to_string();
-    }
-
-    let tail_start = trimmed
-        .char_indices()
-        .nth(total_chars - LIVE_TRANSCRIPT_MAX_CHARS)
-        .map(|(idx, _)| idx)
-        .unwrap_or(0);
-    let tail = trimmed[tail_start..].trim_start();
-    format!("...{}", tail)
 }
 
 fn bundled_app_path(exe: &Path) -> Option<PathBuf> {
@@ -1546,81 +1363,4 @@ fn spawn_delayed_command(program: &OsStr, args: &[OsString]) -> Result<(), Strin
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("unable to launch helper process: {err}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn live_preview_window_caps_to_recent_audio() {
-        let samples: Vec<f32> = (0..(LIVE_TRANSCRIPTION_MAX_SAMPLES + 10))
-            .map(|v| v as f32)
-            .collect();
-        let window = live_preview_window(&samples);
-
-        assert_eq!(window.len(), LIVE_TRANSCRIPTION_MAX_SAMPLES);
-        assert_eq!(window[0], 10.0);
-        assert_eq!(window[window.len() - 1], samples[samples.len() - 1]);
-    }
-
-    #[test]
-    fn live_transcript_formatting_keeps_recent_suffix() {
-        let input = "alpha ".repeat(64);
-        let formatted = format_live_transcript(&input);
-
-        assert!(formatted.starts_with("..."));
-        assert!(formatted.ends_with("alpha"));
-        assert!(formatted.chars().count() <= LIVE_TRANSCRIPT_MAX_CHARS + 3);
-    }
-
-    #[test]
-    fn silence_is_not_detected_as_speech() {
-        let samples = vec![0.0; SPEECH_DETECTION_LOOKBACK_SAMPLES];
-        assert!(!samples_contain_speech(&samples));
-    }
-
-    #[test]
-    fn low_noise_is_not_detected_as_speech() {
-        let samples = vec![0.002; SPEECH_DETECTION_LOOKBACK_SAMPLES];
-        assert!(!samples_contain_speech(&samples));
-    }
-
-    #[test]
-    fn sustained_voice_is_detected_as_speech() {
-        let samples =
-            vec![0.02; SPEECH_DETECTION_FRAME_SAMPLES * SPEECH_DETECTION_MIN_ACTIVE_FRAMES];
-        assert!(samples_contain_speech(&samples));
-    }
-
-    #[test]
-    fn trimmed_speech_range_drops_outer_silence_with_padding() {
-        let mut samples = vec![0.0; SPEECH_DETECTION_FRAME_SAMPLES * 10];
-        samples.extend(vec![0.02; SPEECH_DETECTION_FRAME_SAMPLES * 6]);
-        samples.extend(vec![0.0; SPEECH_DETECTION_FRAME_SAMPLES * 8]);
-
-        let range = final_transcription_window(&samples)
-            .expect("speech should be detected")
-            .range;
-
-        assert_eq!(range.start, 1600);
-        assert_eq!(range.end, 6720);
-    }
-
-    #[test]
-    fn final_transcription_window_salvages_brief_phrase() {
-        let samples = vec![0.02; SPEECH_DETECTION_FRAME_SAMPLES * 2];
-
-        let window = final_transcription_window(&samples).expect("brief speech should survive");
-        assert_eq!(window.range.start, 0);
-        assert_eq!(window.range.end, samples.len());
-        assert!(matches!(window.kind, FinalSpeechWindowKind::ShortUtterance));
-    }
-
-    #[test]
-    fn final_transcription_window_ignores_single_short_spike() {
-        let samples = vec![0.03; SPEECH_DETECTION_FRAME_SAMPLES];
-
-        assert!(final_transcription_window(&samples).is_none());
-    }
 }

@@ -1,5 +1,5 @@
 use crate::hardware::{ComputeBackendPreference, MachineProfile, RuntimeTuning};
-use crate::model_paths;
+use screamer_models::find_model;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
@@ -10,6 +10,7 @@ use whisper_rs::{
 const AUDIO_CTX_SAMPLES_PER_UNIT: usize = 320;
 const AUDIO_CTX_GRANULARITY: i32 = 64;
 const WARMUP_SAMPLES: usize = 16_000;
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum AudioContextStrategy {
@@ -228,9 +229,8 @@ impl Transcriber {
         Ok(Some(text))
     }
 
-    /// Find the model file, checking bundle Resources first, then local models/ dir
     pub fn find_model(model_name: &str) -> Option<PathBuf> {
-        model_paths::find_model(model_name)
+        find_model(model_name)
     }
 
     fn acquire_final_state(&self) -> Result<StateAccess<'_>, String> {

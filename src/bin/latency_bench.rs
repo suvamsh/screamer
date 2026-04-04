@@ -1,20 +1,10 @@
 #[path = "../bench_support.rs"]
 mod bench_support;
 
-#[path = "../hardware.rs"]
-mod hardware;
-
-#[path = "../model_paths.rs"]
-mod model_paths;
-
-#[allow(dead_code)]
-#[path = "../transcriber.rs"]
-mod transcriber;
-
 use bench_support::{read_f32le_file, sample_label, Stats};
+use screamer_whisper::{AudioContextStrategy, Transcriber, TranscriberConfig};
 use std::env;
 use std::path::PathBuf;
-use transcriber::{AudioContextStrategy, Transcriber, TranscriberConfig};
 
 const SAMPLE_RATE: f64 = 16_000.0;
 

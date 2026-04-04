@@ -1265,8 +1265,28 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "oslog",
+ "screamer-core",
+ "screamer-models",
+ "screamer-whisper",
  "serde",
  "serde_json",
+ "whisper-rs",
+]
+
+[[package]]
+name = "screamer-core"
+version = "1.0.0"
+
+[[package]]
+name = "screamer-models"
+version = "1.0.0"
+
+[[package]]
+name = "screamer-whisper"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "screamer-models",
  "whisper-rs",
 ]
 

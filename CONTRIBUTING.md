@@ -23,7 +23,7 @@ Run the usual checks before opening a PR:
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo test --workspace --all-targets
 ```
 
 When a change could affect the existing macOS app shell, also run the bundle smoke test:

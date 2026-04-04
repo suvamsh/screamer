@@ -1,6 +1,6 @@
-use crate::audio::{resample_to_target, TARGET_SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Stream, SupportedBufferSize};
+use screamer_core::audio::{resample_to_target, TARGET_SAMPLE_RATE};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
