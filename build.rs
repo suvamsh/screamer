@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=CoreGraphics");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
     println!("cargo:rustc-link-lib=framework=Carbon");
+    println!("cargo:rustc-link-lib=framework=ImageIO");
 
     // Set minimum macOS deployment target
     println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=13.0");

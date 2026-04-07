@@ -4,6 +4,9 @@ use objc2_foundation::MainThreadMarker;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+// Modifier flags for detecting Option tap
+const OPTION_MODIFIER: u64 = 0x00080000;
+
 pub struct Hotkey {
     is_pressed: Arc<AtomicBool>,
     selected_index: Arc<AtomicUsize>,
@@ -28,16 +31,22 @@ impl Hotkey {
     }
 
     /// Start listening using NSEvent global monitor on the main thread.
-    /// Reads the current hotkey selection from in-memory state so settings changes
-    /// take effect without restarting the app.
+    ///
+    /// Three callbacks:
+    /// - `on_press` / `on_release`: dictation hotkey (configurable single modifier)
+    /// - `on_screenshot_tap`: fires when Option is pressed while dictation is active
     pub fn start_on_main_thread(
         &self,
         _mtm: MainThreadMarker,
         on_press: impl Fn() + 'static,
         on_release: impl Fn() + 'static,
+        on_screenshot_tap: impl Fn() + 'static,
     ) {
         let is_pressed = self.is_pressed.clone();
         let selected_index = self.selected_index.clone();
+
+        // Track whether Option was down on the previous event so we detect edges.
+        let option_was_down = Arc::new(AtomicBool::new(false));
 
         let hotkey_info = HOTKEYS
             .get(selected_index.load(Ordering::Relaxed))
@@ -47,6 +56,7 @@ impl Hotkey {
             "[screamer] Hotkey configured: {} (modifier=0x{:x}, device=0x{:x})",
             hotkey_info.label, hotkey_info.modifier_flag, hotkey_info.device_flag
         );
+        eprintln!("[screamer] Screenshot tap: Option (while recording)");
 
         // NSEventMaskFlagsChanged = 1 << 12 = 4096
         let mask: u64 = 1 << 12;
@@ -60,10 +70,8 @@ impl Hotkey {
                 .get(selected_index.load(Ordering::Relaxed))
                 .unwrap_or(&HOTKEYS[0]);
 
-            // Check if the modifier is down (device-independent)
+            // ── Dictation hotkey (configurable modifier) ──
             let modifier_down = (flags & hotkey_info.modifier_flag) != 0;
-
-            // If we have a device-specific flag, also check that
             let key_down = if hotkey_info.device_flag != 0 {
                 modifier_down && (flags & hotkey_info.device_flag) != 0
             } else {
@@ -86,6 +94,18 @@ impl Hotkey {
                 );
                 is_pressed.store(false, Ordering::SeqCst);
                 on_release();
+            }
+
+            // ── Option tap detection (only while recording) ──
+            let option_down = (flags & OPTION_MODIFIER) != 0;
+            let option_was = option_was_down.swap(option_down, Ordering::SeqCst);
+
+            if option_down && !option_was && is_pressed.load(Ordering::SeqCst) {
+                eprintln!(
+                    "[screamer] Option tapped during recording (flags=0x{:x})",
+                    flags
+                );
+                on_screenshot_tap();
             }
         });
 

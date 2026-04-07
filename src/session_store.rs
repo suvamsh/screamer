@@ -491,7 +491,9 @@ fn preview(text: &str) -> String {
         .unwrap_or(first_line)
         .trim();
     let mut preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
-    preview.truncate(56);
+    if let Some((idx, _)) = preview.char_indices().nth(56) {
+        preview.truncate(idx);
+    }
     preview
 }
 

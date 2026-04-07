@@ -181,6 +181,9 @@ pub struct DiarizedSegment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// Hint from the transcriber that this segment should start a new bubble
+    /// (e.g. a detected speaker turn boundary).
+    pub force_new: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -202,10 +205,22 @@ pub struct StructuredNotes {
     pub action_items: Vec<String>,
     pub open_questions: Vec<String>,
     pub transcript: String,
+    /// Free-form markdown produced by the General template.  When present,
+    /// `to_markdown()` emits this directly instead of the fixed sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_notes: Option<String>,
 }
 
 impl StructuredNotes {
     pub fn to_markdown(&self) -> String {
+        if let Some(raw) = &self.raw_notes {
+            let mut out = raw.trim().to_string();
+            if !self.transcript.is_empty() {
+                out.push_str("\n\n## Transcript\n\n");
+                out.push_str(&self.transcript);
+            }
+            return out;
+        }
         let mut out = String::new();
         push_section(&mut out, "Summary", &[self.summary.clone()]);
         push_section(&mut out, "Key Points", &self.key_points);
@@ -305,6 +320,7 @@ pub fn stitch_text(existing: &str, incoming: &str) -> String {
 pub fn merge_segment(
     segments: &mut Vec<CanonicalSegment>,
     mut incoming: CanonicalSegment,
+    force_new: bool,
 ) -> Option<CanonicalSegment> {
     let stitched = segments
         .last()
@@ -316,17 +332,22 @@ pub fn merge_segment(
     }
     incoming.text = stitched;
 
-    if let Some(last) = segments.last_mut() {
-        if last.speaker == incoming.speaker
-            && last.lane == incoming.lane
-            && incoming.start_ms.saturating_sub(last.end_ms) <= 1_500
-        {
-            if !last.text.ends_with('.') && !last.text.ends_with('!') && !last.text.ends_with('?') {
-                last.text.push(' ');
+    if !force_new {
+        if let Some(last) = segments.last_mut() {
+            if last.speaker == incoming.speaker
+                && last.lane == incoming.lane
+                && incoming.start_ms.saturating_sub(last.end_ms) <= 800
+            {
+                if !last.text.ends_with('.')
+                    && !last.text.ends_with('!')
+                    && !last.text.ends_with('?')
+                {
+                    last.text.push(' ');
+                }
+                last.text.push_str(incoming.text.trim());
+                last.end_ms = incoming.end_ms;
+                return Some(last.clone());
             }
-            last.text.push_str(incoming.text.trim());
-            last.end_ms = incoming.end_ms;
-            return Some(last.clone());
         }
     }
 
@@ -429,10 +450,41 @@ mod tests {
                 end_ms: 1_000,
                 text: "world".to_string(),
             },
+            false,
         )
         .unwrap();
 
         assert_eq!(segments.len(), 1);
         assert_eq!(merged.text, "hello world");
+    }
+
+    #[test]
+    fn force_new_prevents_merge() {
+        let mut segments = vec![CanonicalSegment {
+            id: 1,
+            lane: AudioLane::Microphone,
+            speaker: SpeakerLabel::You,
+            start_ms: 0,
+            end_ms: 500,
+            text: "hello".to_string(),
+        }];
+
+        merge_segment(
+            &mut segments,
+            CanonicalSegment {
+                id: 2,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::You,
+                start_ms: 600,
+                end_ms: 1_000,
+                text: "world".to_string(),
+            },
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "hello");
+        assert_eq!(segments[1].text, "world");
     }
 }

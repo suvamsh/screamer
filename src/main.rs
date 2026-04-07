@@ -13,11 +13,13 @@ mod paster;
 mod permission_window;
 mod permissions;
 mod recorder;
+mod screenshot;
 mod session_store;
 mod settings_window;
 mod sound;
 mod summary_backend;
 mod theme;
+mod vision;
 
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;

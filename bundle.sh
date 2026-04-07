@@ -9,6 +9,7 @@ MODELS_DIR="${MODELS_DIR:-models}"
 SUMMARY_MODELS_DIR="${SUMMARY_MODELS_DIR:-models/summary}"
 BIN_PATH="${BIN_PATH:-target/release/screamer}"
 SUMMARY_HELPER_PATH="${SUMMARY_HELPER_PATH:-target/release/screamer_summary_helper}"
+VISION_HELPER_PATH="${VISION_HELPER_PATH:-target/release/screamer_vision_helper}"
 PLIST_BUDDY="${PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 SYSTEM_CODESIGN="${SYSTEM_CODESIGN:-/usr/bin/codesign}"
 SYSTEM_SECURITY="${SYSTEM_SECURITY:-/usr/bin/security}"
@@ -24,6 +25,10 @@ REQUIRED_MODELS=(
 )
 REQUIRED_SUMMARY_MODELS=(
     "gemma-3-1b-it-q4_k_m.gguf"
+)
+VISION_MODELS=(
+    "gemma-3-4b-it-q4.gguf"
+    "mmproj-gemma-3-4b-it-f16.gguf"
 )
 
 detect_codesign_identity() {
@@ -114,6 +119,9 @@ mkdir -p "$CONTENTS/Resources/models/summary"
 
 cp "$BIN_PATH" "$CONTENTS/MacOS/Screamer"
 cp "$SUMMARY_HELPER_PATH" "$CONTENTS/MacOS/screamer_summary_helper"
+if [ -f "$VISION_HELPER_PATH" ]; then
+    cp "$VISION_HELPER_PATH" "$CONTENTS/MacOS/screamer_vision_helper"
+fi
 cp "$INFO_PLIST_TEMPLATE" "$INFO_PLIST"
 cp resources/icon.icns "$CONTENTS/Resources/"
 cp resources/image.png "$CONTENTS/Resources/"
@@ -182,6 +190,17 @@ else
     fi
 fi
 
+# Bundle vision models (optional — vision feature degrades gracefully without them).
+for model_name in "${VISION_MODELS[@]}"; do
+    model_path="$SUMMARY_MODELS_DIR/$model_name"
+    if [ -f "$model_path" ] && [ -s "$model_path" ]; then
+        echo "Bundling vision model: $model_name"
+        cp "$model_path" "$CONTENTS/Resources/models/summary/"
+    else
+        echo "Skipping vision model (not found): $model_name"
+    fi
+done
+
 if [ ! -x "$SYSTEM_CODESIGN" ]; then
     echo "Error: Apple codesign tool not found at $SYSTEM_CODESIGN"
     exit 1
@@ -189,6 +208,9 @@ fi
 
 echo "Signing app bundle with Apple codesign..."
 sign_target "$CONTENTS/MacOS/screamer_summary_helper"
+if [ -f "$CONTENTS/MacOS/screamer_vision_helper" ]; then
+    sign_target "$CONTENTS/MacOS/screamer_vision_helper"
+fi
 sign_target "$CONTENTS/MacOS/Screamer"
 sign_target "$APP"
 "$SYSTEM_CODESIGN" --verify --deep --strict --verbose=2 "$APP"

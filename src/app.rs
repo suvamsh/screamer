@@ -73,6 +73,7 @@ pub struct App {
     live_transcript: Arc<Mutex<String>>,
     pending_completion_sound: Arc<AtomicBool>,
     recording_session: Arc<AtomicU64>,
+    vision_overlay_state: Arc<Mutex<crate::overlay::VisionOverlayState>>,
 }
 
 pub struct AppInitError {
@@ -360,6 +361,10 @@ fn menu_handler_class() -> &'static AnyClass {
                 open_session_from_home_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
             builder.add_method(
+                sel!(reprocessSession:),
+                reprocess_session_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
                 sel!(applicationShouldHandleReopen:hasVisibleWindows:),
                 application_should_handle_reopen
                     as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
@@ -555,6 +560,14 @@ extern "C" fn set_summary_template_action(
 ) {
     let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
     set_summary_template(index as usize);
+}
+
+extern "C" fn reprocess_session_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    _sender: *mut AnyObject,
+) {
+    reprocess_current_session();
 }
 
 extern "C" fn open_session_from_sidebar_action(
@@ -844,6 +857,29 @@ fn stop_ambient_session() {
     }
 }
 
+fn reprocess_current_session() {
+    let session_id = MAIN_WINDOW.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|window| window.current_session_id())
+    });
+    let Some(session_id) = session_id else {
+        return;
+    };
+    if session_id == 0 {
+        return;
+    }
+    let Some(controller) = AMBIENT_CONTROLLER.get() else {
+        return;
+    };
+    let config = Config::load();
+    if let Err(err) = controller.reprocess_session(session_id, &config) {
+        if let Some(mtm) = MainThreadMarker::new() {
+            App::show_alert(mtm, "Unable to reprocess session", &err);
+        }
+    }
+}
+
 fn set_summary_template(index: usize) {
     MAIN_WINDOW.with(|cell| {
         if let Some(window) = cell.borrow().as_ref() {
@@ -1096,6 +1132,7 @@ impl App {
             live_transcript: Arc::new(Mutex::new(String::new())),
             pending_completion_sound: Arc::new(AtomicBool::new(false)),
             recording_session: Arc::new(AtomicU64::new(0)),
+            vision_overlay_state: Arc::new(Mutex::new(crate::overlay::VisionOverlayState::Hidden)),
         })
     }
 
@@ -1243,36 +1280,46 @@ impl App {
     }
 
     pub fn start(&self, mtm: MainThreadMarker) {
-        let recorder = self.recorder.clone();
         let ambient_controller = self.ambient_controller.clone();
         let sound_player_press = self.sound_player.clone();
-        let transcriber = self.transcriber.clone();
-        let is_recording = self.is_recording.clone();
-        let live_transcription_enabled = self.live_transcription_enabled.clone();
-        let sound_effects_enabled = self.sound_effects_enabled.clone();
-        let live_transcript = self.live_transcript.clone();
-        let pending_completion_sound = self.pending_completion_sound.clone();
-        let recording_session = self.recording_session.clone();
+        let is_rec_press = self.is_recording.clone();
+        let is_rec_release = self.is_recording.clone();
+        let rec_press = self.recorder.clone();
+        let rec_release = self.recorder.clone();
+        let trans_press = self.transcriber.clone();
+        let trans_release = self.transcriber.clone();
+        let live_transcription_enabled_press = self.live_transcription_enabled.clone();
+        let sound_effects_enabled_press = self.sound_effects_enabled.clone();
+        let sound_effects_enabled_release = self.sound_effects_enabled.clone();
+        let live_transcript_press = self.live_transcript.clone();
+        let live_transcript_release = self.live_transcript.clone();
+        let pending_completion_sound_release = self.pending_completion_sound.clone();
+        let recording_session_press = self.recording_session.clone();
 
-        let rec_press = recorder.clone();
-        let rec_release = recorder.clone();
-        let trans_press = transcriber.clone();
-        let trans_release = transcriber.clone();
-        let is_rec_press = is_recording.clone();
-        let is_rec_release = is_recording.clone();
-        let live_transcription_enabled_press = live_transcription_enabled.clone();
-        let sound_effects_enabled_press = sound_effects_enabled.clone();
-        let sound_effects_enabled_release = sound_effects_enabled.clone();
-        let live_transcript_press = live_transcript.clone();
-        let live_transcript_release = live_transcript.clone();
-        let pending_completion_sound_release = pending_completion_sound.clone();
-        let recording_session_press = recording_session.clone();
+        // Shared screenshot path — set by Option tap, consumed by release
+        let vision_screenshot: Arc<Mutex<Option<std::path::PathBuf>>> =
+            Arc::new(Mutex::new(None));
+        let vision_screenshot_tap = vision_screenshot.clone();
+        let vision_screenshot_release = vision_screenshot.clone();
+        let vision_state_press = self.vision_overlay_state.clone();
+        let vision_state_release = self.vision_overlay_state.clone();
 
         let hotkey = self.hotkey.clone();
 
         hotkey.start_on_main_thread(
             mtm,
+            // ── Press (Control) ──
             move || {
+                // Clear any previous vision response
+                if let Ok(mut vs) = vision_state_press.lock() {
+                    *vs = crate::overlay::VisionOverlayState::Hidden;
+                }
+                // Clear any stale screenshot from a previous session
+                if let Ok(mut ss) = vision_screenshot_tap.lock() {
+                    if let Some(old) = ss.take() {
+                        let _ = std::fs::remove_file(&old);
+                    }
+                }
                 if ambient_controller.active_snapshot().is_some() {
                     eprintln!("[screamer] Ignoring dictation hotkey while ambient session is active");
                     return;
@@ -1331,6 +1378,7 @@ impl App {
                     eprintln!("[screamer] Recording armed");
                 }
             },
+            // ── Release (Control) ──
             move || {
                 if is_rec_release
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -1342,6 +1390,13 @@ impl App {
                         transcript.clear();
                     }
                     eprintln!("[screamer] Recording stopped, {} samples", samples.len());
+
+                    // Check if a screenshot was captured during this recording
+                    let screenshot_path = vision_screenshot_release
+                        .lock()
+                        .ok()
+                        .and_then(|mut ss| ss.take());
+                    let is_vision = screenshot_path.is_some();
 
                     let transcribe_window = match prepare_final_transcription(&samples) {
                         FinalTranscriptionAction::SkipSilence => {
@@ -1384,6 +1439,15 @@ impl App {
                     let pending_completion_sound = pending_completion_sound_release.clone();
                     let sound_effects_enabled = sound_effects_enabled_release.clone();
                     let stop_ms = release_t0.elapsed().as_millis();
+                    let vision_state = vision_state_release.clone();
+
+                    if is_vision {
+                        // Set loading state before spawning thread
+                        if let Ok(mut vs) = vision_state.lock() {
+                            *vs = crate::overlay::VisionOverlayState::Loading;
+                        }
+                    }
+
                     std::thread::spawn(move || {
                         match t.transcribe_profiled(&samples[transcribe_window.range]) {
                             Ok(result) if !result.text.is_empty() => {
@@ -1394,41 +1458,86 @@ impl App {
                                 );
                                 logging::log_transcript("Final transcript", &result.text);
 
-                                if !permissions::has_accessibility_permission() {
-                                    eprintln!(
-                                        "[screamer] Accessibility permission missing; automatic paste may fail for this build"
-                                    );
-                                }
-
-                                let paste_t0 = std::time::Instant::now();
-                                let paste_result = crate::paster::paste(&result.text);
-                                let paste_ms = paste_t0.elapsed().as_millis();
-
-                                match paste_result {
-                                    Ok(()) => {
+                                if let Some(screenshot_path) = screenshot_path {
+                                    // ── Vision path: send to multimodal model ──
+                                    eprintln!("[screamer] Vision: asking model about screenshot...");
+                                    let vision_t0 = std::time::Instant::now();
+                                    match crate::vision::ask_about_screen(
+                                        &result.text,
+                                        &screenshot_path,
+                                    ) {
+                                        Ok(response) => {
+                                            eprintln!(
+                                                "[screamer] Vision response in {}ms ({} chars):\n{}",
+                                                vision_t0.elapsed().as_millis(),
+                                                response.len(),
+                                                response
+                                            );
+                                            if let Ok(mut vs) = vision_state.lock() {
+                                                *vs = crate::overlay::VisionOverlayState::Response(
+                                                    response,
+                                                );
+                                            }
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[screamer] Vision model error: {err}");
+                                            if let Ok(mut vs) = vision_state.lock() {
+                                                *vs =
+                                                    crate::overlay::VisionOverlayState::Error(err);
+                                            }
+                                        }
+                                    }
+                                    let _ = std::fs::remove_file(&screenshot_path);
+                                } else {
+                                    // ── Normal dictation path: paste text ──
+                                    if !permissions::has_accessibility_permission() {
                                         eprintln!(
-                                            "[screamer] Latency breakdown: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
-                                            stop_ms,
-                                            result.profile.state_acquire.as_millis(),
-                                            result.profile.inference.as_millis(),
-                                            result.profile.extract.as_millis(),
-                                            paste_ms,
-                                            release_t0.elapsed().as_millis()
+                                            "[screamer] Accessibility permission missing; automatic paste may fail for this build"
                                         );
                                     }
-                                    Err(err) => {
-                                        eprintln!(
-                                            "[screamer] Paste failed after {}ms: {}",
-                                            paste_ms, err
-                                        );
+
+                                    let paste_t0 = std::time::Instant::now();
+                                    let paste_result = crate::paster::paste(&result.text);
+                                    let paste_ms = paste_t0.elapsed().as_millis();
+
+                                    match paste_result {
+                                        Ok(()) => {
+                                            eprintln!(
+                                                "[screamer] Latency breakdown: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
+                                                stop_ms,
+                                                result.profile.state_acquire.as_millis(),
+                                                result.profile.inference.as_millis(),
+                                                result.profile.extract.as_millis(),
+                                                paste_ms,
+                                                release_t0.elapsed().as_millis()
+                                            );
+                                        }
+                                        Err(err) => {
+                                            eprintln!(
+                                                "[screamer] Paste failed after {}ms: {}",
+                                                paste_ms, err
+                                            );
+                                        }
                                     }
                                 }
                             }
                             Ok(_) => {
-                                eprintln!("[screamer] Empty transcription, skipping paste");
+                                eprintln!("[screamer] Empty transcription, skipping");
+                                if is_vision {
+                                    if let Ok(mut vs) = vision_state.lock() {
+                                        *vs = crate::overlay::VisionOverlayState::Hidden;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 eprintln!("[screamer] Transcription error: {}", e);
+                                if is_vision {
+                                    if let Ok(mut vs) = vision_state.lock() {
+                                        *vs = crate::overlay::VisionOverlayState::Error(
+                                            format!("Transcription failed: {e}"),
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -1436,6 +1545,27 @@ impl App {
                             pending_completion_sound.store(true, Ordering::SeqCst);
                         }
                     });
+                }
+            },
+            // ── Screenshot tap (Option while recording) ──
+            {
+                let vision_screenshot = vision_screenshot.clone();
+                move || {
+                    match crate::screenshot::capture_screen() {
+                        Ok(path) => {
+                            eprintln!("[screamer] Screenshot captured: {}", path.display());
+                            if let Ok(mut ss) = vision_screenshot.lock() {
+                                // Clean up any previous screenshot from this session
+                                if let Some(old) = ss.take() {
+                                    let _ = std::fs::remove_file(&old);
+                                }
+                                *ss = Some(path);
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("[screamer] Screenshot failed: {err}");
+                        }
+                    }
                 }
             },
         );
@@ -1454,6 +1584,7 @@ impl App {
         let sound_effects_enabled = self.sound_effects_enabled.clone();
         let live_transcript = self.live_transcript.clone();
         let pending_completion_sound = self.pending_completion_sound.clone();
+        let vision_overlay_state = self.vision_overlay_state.clone();
 
         unsafe {
             use objc2::ClassType;
@@ -1471,6 +1602,17 @@ impl App {
                     sound_player.play_processing_done();
                 }
 
+                // Read the current vision state
+                let vision_state = vision_overlay_state
+                    .lock()
+                    .map(|vs| vs.clone())
+                    .unwrap_or(crate::overlay::VisionOverlayState::Hidden);
+
+                let vision_active = !matches!(
+                    vision_state,
+                    crate::overlay::VisionOverlayState::Hidden
+                );
+
                 if let Ok(mut ov) = overlay.try_borrow_mut() {
                     if recording {
                         if !ov.is_visible() {
@@ -1487,6 +1629,14 @@ impl App {
                         };
                         ov.update_waveform(&waveform);
                         ov.update_transcript(&transcript);
+                        // Sync vision state to overlay
+                        ov.set_vision_state(vision_state);
+                    } else if vision_active {
+                        // Keep overlay visible while vision is loading/showing response
+                        if !ov.is_visible() {
+                            ov.show();
+                        }
+                        ov.set_vision_state(vision_state);
                     } else if ov.is_visible() {
                         ov.hide();
                     }

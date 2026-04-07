@@ -3,7 +3,7 @@ use crate::recorder::Recorder;
 use crate::session_store::{SessionDetail, SessionStore};
 use crate::summary_backend::SummaryBackendRegistry;
 use screamer_core::ambient::{
-    chunk_len_samples, chunk_step_samples, merge_segment, stitch_text, AmbientSessionConfig,
+    chunk_len_samples, chunk_step_samples, merge_segment, AmbientSessionConfig,
     AmbientSessionState, AudioLane, CanonicalSegment, DiarizationEngine, DiarizationRequest,
     DiarizedSegment, SummaryTemplate, TranscriptSegment,
 };
@@ -268,6 +268,80 @@ impl AmbientController {
         self.store.update_summary_template(session_id, template)
     }
 
+    pub fn reprocess_session(&self, session_id: i64, config: &Config) -> Result<(), String> {
+        // Don't reprocess if there's an active recording session
+        if self.active_snapshot().is_some() {
+            return Err("Cannot reprocess while a session is active.".to_string());
+        }
+
+        let detail = self
+            .store
+            .load_session(session_id)?
+            .ok_or_else(|| "Session not found.".to_string())?;
+
+        // Set state to Processing
+        self.store
+            .update_state(session_id, AmbientSessionState::Processing, None)?;
+
+        let store = self.store.clone();
+        let summary_registry = self.summary_registry.clone();
+        let app_config = config.clone();
+        std::thread::spawn(move || {
+            let summarizer = summary_registry.summarizer_for_config(&app_config);
+            let title_hint = summary_registry.concise_session_title(
+                &app_config,
+                &detail.live_notes,
+                &detail.segments,
+            );
+            let notes_with_scratch = if detail.scratch_pad.trim().is_empty() {
+                detail.live_notes.clone()
+            } else {
+                format!(
+                    "--- User Notes (Scratch Pad) ---\n{}\n--- End User Notes ---\n\n{}",
+                    detail.scratch_pad, detail.live_notes
+                )
+            };
+            let structured_notes = summarizer
+                .summarize(
+                    &notes_with_scratch,
+                    &detail.segments,
+                    Some(&title_hint),
+                    detail.summary_template,
+                )
+                .map(|notes| notes.to_markdown())
+                .unwrap_or_else(|err| {
+                    format!(
+                        "## Summary\n\n{}\n\n## Key Points\n\n- {}\n",
+                        title_hint, err
+                    )
+                });
+            let transcript_markdown =
+                screamer_core::ambient::segments_to_transcript(&detail.segments);
+
+            // Generate a better title from the completed summary
+            let title = summary_registry.title_from_summary(
+                &app_config,
+                &structured_notes,
+                &detail.live_notes,
+                &detail.segments,
+            );
+
+            let final_state = if structured_notes.is_empty() {
+                AmbientSessionState::Failed
+            } else {
+                AmbientSessionState::Completed
+            };
+            let _ = store.update_structured_notes(
+                session_id,
+                &title,
+                &structured_notes,
+                &transcript_markdown,
+            );
+            let _ = store.update_state(session_id, final_state, Some(unix_ms()));
+        });
+        Ok(())
+    }
+
     pub fn persist_scratch_pad(&self, session_id: i64, scratch_pad: &str) -> Result<(), String> {
         if let Some(active) = self.active_snapshot() {
             if active.id == session_id {
@@ -368,7 +442,9 @@ fn spawn_runtime_worker(
             )
         };
         let summarizer = summary_registry.summarizer_for_config(&app_config);
-        let title = summary_registry.concise_session_title(&app_config, &live_notes, &segments);
+        // Use a heuristic title hint for the summarizer prompt
+        let title_hint =
+            summary_registry.concise_session_title(&app_config, &live_notes, &segments);
         let notes_with_scratch = if scratch_pad.trim().is_empty() {
             live_notes.clone()
         } else {
@@ -381,14 +457,25 @@ fn spawn_runtime_worker(
             .summarize(
                 &notes_with_scratch,
                 &segments,
-                Some(&title),
+                Some(&title_hint),
                 summary_template,
             )
             .map(|notes| notes.to_markdown())
             .unwrap_or_else(|err| {
-                format!("## Summary\n\n{}\n\n## Key Points\n\n- {}\n", title, err)
+                format!(
+                    "## Summary\n\n{}\n\n## Key Points\n\n- {}\n",
+                    title_hint, err
+                )
             });
         let transcript_markdown = screamer_core::ambient::segments_to_transcript(&segments);
+
+        // Generate a better title from the completed summary
+        let title = summary_registry.title_from_summary(
+            &app_config,
+            &structured_notes,
+            &live_notes,
+            &segments,
+        );
 
         let final_state = if structured_notes.is_empty() {
             AmbientSessionState::Failed
@@ -554,26 +641,18 @@ fn integrate_diarized_segments(
     let mut changed = false;
 
     for segment in diarized {
-        let stitched = segments
-            .last()
-            .map(|last| stitch_text(&last.text, &segment.text))
-            .unwrap_or_else(|| segment.text.clone());
-        if stitched.trim().is_empty() {
-            continue;
-        }
-
         let candidate = CanonicalSegment {
             id: *next_segment_id,
             lane: segment.lane,
             speaker: segment.speaker,
             start_ms: segment.start_ms,
             end_ms: segment.end_ms,
-            text: stitched.trim().to_string(),
+            text: segment.text.trim().to_string(),
         };
 
         let len_before = segments.len();
         let tail_before = segments.last().cloned();
-        if merge_segment(segments, candidate).is_some() {
+        if merge_segment(segments, candidate, segment.force_new).is_some() {
             if segments.len() > len_before {
                 *next_segment_id += 1;
                 changed = true;

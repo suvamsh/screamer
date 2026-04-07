@@ -121,6 +121,51 @@ impl SummaryBackendRegistry {
         sanitize_session_title(&String::from_utf8_lossy(&output.stdout))
     }
 
+    /// Generate a concise session title from the already-generated summary.
+    /// Falls back to `concise_session_title` (heuristic / raw transcript) on failure.
+    pub fn title_from_summary(
+        &self,
+        config: &Config,
+        structured_notes: &str,
+        live_notes: &str,
+        segments: &[CanonicalSegment],
+    ) -> String {
+        let fallback = self.concise_session_title(config, live_notes, segments);
+
+        // Need some summary content to work with
+        let summary_excerpt = excerpt_lines(structured_notes, 20);
+        if summary_excerpt.trim().is_empty() {
+            return fallback;
+        }
+
+        let prompt = build_title_from_summary_prompt(&summary_excerpt, &fallback);
+
+        let result = match config.summary_backend {
+            SummaryBackendPreference::Ollama => {
+                if let Some(model) = self.preferred_title_model(config) {
+                    Command::new("ollama")
+                        .arg("run")
+                        .arg(&model)
+                        .arg(&prompt)
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                } else {
+                    None
+                }
+            }
+            SummaryBackendPreference::Bundled => {
+                generate_bundled_summary(&prompt, 32).ok()
+            }
+        };
+
+        match result {
+            Some(raw) if !raw.trim().is_empty() => sanitize_session_title(&raw),
+            _ => fallback,
+        }
+    }
+
     pub fn has_any_ollama_model(&self) -> bool {
         !self.ollama_models.is_empty()
     }
@@ -150,6 +195,11 @@ impl NotesSummarizer for BundledSummaryBackend {
     ) -> Result<StructuredNotes, String> {
         let title_hint = title_hint.filter(|value| !value.trim().is_empty());
         let fallback = heuristic_structured_notes(live_notes, segments, title_hint);
+
+        if template == SummaryTemplate::General {
+            return summarize_general_chunked(live_notes, segments, title_hint, fallback);
+        }
+
         let prompt = build_structured_notes_prompt(live_notes, segments, title_hint, template);
 
         match generate_bundled_summary(&prompt, BUNDLED_SUMMARY_MAX_TOKENS) {
@@ -165,15 +215,8 @@ struct OllamaSummaryBackend {
     model: String,
 }
 
-impl NotesSummarizer for OllamaSummaryBackend {
-    fn summarize(
-        &self,
-        live_notes: &str,
-        segments: &[CanonicalSegment],
-        title_hint: Option<&str>,
-        template: SummaryTemplate,
-    ) -> Result<StructuredNotes, String> {
-        let prompt = build_structured_notes_prompt(live_notes, segments, title_hint, template);
+impl OllamaSummaryBackend {
+    fn generate(&self, prompt: &str) -> Result<String, String> {
         let output = Command::new("ollama")
             .arg("run")
             .arg(&self.model)
@@ -185,7 +228,28 @@ impl NotesSummarizer for OllamaSummaryBackend {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
         }
 
-        let content = trim_generated_response(&String::from_utf8_lossy(&output.stdout));
+        Ok(trim_generated_response(
+            &String::from_utf8_lossy(&output.stdout),
+        ))
+    }
+}
+
+impl NotesSummarizer for OllamaSummaryBackend {
+    fn summarize(
+        &self,
+        live_notes: &str,
+        segments: &[CanonicalSegment],
+        title_hint: Option<&str>,
+        template: SummaryTemplate,
+    ) -> Result<StructuredNotes, String> {
+        if template == SummaryTemplate::General {
+            let fallback = heuristic_structured_notes(live_notes, segments, title_hint);
+            return summarize_general_ollama(self, live_notes, segments, title_hint, fallback);
+        }
+
+        let prompt = build_structured_notes_prompt(live_notes, segments, title_hint, template);
+        let content = self.generate(&prompt)?;
+
         if content.is_empty() {
             return Ok(heuristic_structured_notes(live_notes, segments, title_hint));
         }
@@ -218,6 +282,161 @@ fn detect_ollama_models() -> Vec<String> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// General-template chunked summarization
+// ---------------------------------------------------------------------------
+
+/// Threshold (in chars) below which we summarize in a single pass.
+const GENERAL_SINGLE_PASS_CHARS: usize = 6_000;
+/// Max chars per chunk when splitting a long transcript.
+const GENERAL_CHUNK_CHARS: usize = 5_000;
+/// Max tokens for each chunk summary (bundled model).
+const GENERAL_CHUNK_MAX_TOKENS: usize = 384;
+/// Max tokens for the final merge pass (bundled model).
+const GENERAL_MERGE_MAX_TOKENS: usize = 768;
+
+fn summarize_general_chunked(
+    live_notes: &str,
+    segments: &[CanonicalSegment],
+    title_hint: Option<&str>,
+    fallback: StructuredNotes,
+) -> Result<StructuredNotes, String> {
+    let transcript = prepared_summary_context(live_notes, segments);
+    let title = title_hint.unwrap_or("Ambient session");
+
+    // Short transcripts: single pass
+    if transcript.chars().count() <= GENERAL_SINGLE_PASS_CHARS {
+        let prompt = format!(
+            "{GENERAL_TEMPLATE_PROMPT}\n\nTitle hint: {title}\n\nTranscript:\n{transcript}"
+        );
+        return match generate_bundled_summary(&prompt, GENERAL_MERGE_MAX_TOKENS) {
+            Ok(raw) if !raw.trim().is_empty() => Ok(general_raw_notes(raw, segments)),
+            _ => Ok(fallback),
+        };
+    }
+
+    // Long transcripts: chunk → summarize each → merge
+    let chunks = split_transcript_chunks(&transcript, GENERAL_CHUNK_CHARS);
+    let mut chunk_summaries = Vec::new();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let prompt = format!(
+            "{GENERAL_CHUNK_PROMPT}\n\nPart {}/{} of transcript:\n{chunk}",
+            i + 1,
+            chunks.len()
+        );
+        match generate_bundled_summary(&prompt, GENERAL_CHUNK_MAX_TOKENS) {
+            Ok(partial) if !partial.trim().is_empty() => {
+                chunk_summaries.push(trim_generated_response(&partial));
+            }
+            _ => {} // skip failed chunks
+        }
+    }
+
+    if chunk_summaries.is_empty() {
+        return Ok(fallback);
+    }
+
+    let combined = chunk_summaries.join("\n\n---\n\n");
+    let merge_prompt = format!(
+        "{GENERAL_MERGE_PROMPT}\n\nTitle hint: {title}\n\nPartial summaries:\n{combined}"
+    );
+
+    match generate_bundled_summary(&merge_prompt, GENERAL_MERGE_MAX_TOKENS) {
+        Ok(raw) if !raw.trim().is_empty() => Ok(general_raw_notes(raw, segments)),
+        _ => {
+            // If merge fails, concatenate chunk summaries as the output
+            Ok(general_raw_notes(combined, segments))
+        }
+    }
+}
+
+fn summarize_general_ollama(
+    backend: &OllamaSummaryBackend,
+    live_notes: &str,
+    segments: &[CanonicalSegment],
+    title_hint: Option<&str>,
+    fallback: StructuredNotes,
+) -> Result<StructuredNotes, String> {
+    let transcript = prepared_summary_context(live_notes, segments);
+    let title = title_hint.unwrap_or("Ambient session");
+
+    if transcript.chars().count() <= GENERAL_SINGLE_PASS_CHARS {
+        let prompt = format!(
+            "{GENERAL_TEMPLATE_PROMPT}\n\nTitle hint: {title}\n\nTranscript:\n{transcript}"
+        );
+        return match backend.generate(&prompt) {
+            Ok(raw) if !raw.trim().is_empty() => Ok(general_raw_notes(raw, segments)),
+            Ok(_) => Ok(fallback),
+            Err(err) => Err(err),
+        };
+    }
+
+    let chunks = split_transcript_chunks(&transcript, GENERAL_CHUNK_CHARS);
+    let mut chunk_summaries = Vec::new();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let prompt = format!(
+            "{GENERAL_CHUNK_PROMPT}\n\nPart {}/{} of transcript:\n{chunk}",
+            i + 1,
+            chunks.len()
+        );
+        if let Ok(partial) = backend.generate(&prompt) {
+            if !partial.trim().is_empty() {
+                chunk_summaries.push(partial);
+            }
+        }
+    }
+
+    if chunk_summaries.is_empty() {
+        return Ok(fallback);
+    }
+
+    let combined = chunk_summaries.join("\n\n---\n\n");
+    let merge_prompt = format!(
+        "{GENERAL_MERGE_PROMPT}\n\nTitle hint: {title}\n\nPartial summaries:\n{combined}"
+    );
+
+    match backend.generate(&merge_prompt) {
+        Ok(raw) if !raw.trim().is_empty() => Ok(general_raw_notes(raw, segments)),
+        _ => Ok(general_raw_notes(combined, segments)),
+    }
+}
+
+/// Build a `StructuredNotes` that uses `raw_notes` so `to_markdown()` emits
+/// the LLM output directly instead of the rigid section layout.
+fn general_raw_notes(raw: String, segments: &[CanonicalSegment]) -> StructuredNotes {
+    let cleaned = strip_code_fence(&trim_generated_response(&raw));
+    StructuredNotes {
+        transcript: segments_to_transcript(segments),
+        raw_notes: Some(cleaned),
+        ..Default::default()
+    }
+}
+
+/// Split transcript text into roughly equal chunks on line boundaries.
+fn split_transcript_chunks(text: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for line in text.lines() {
+        if !current.is_empty() && current.chars().count() + line.chars().count() + 1 > max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+    chunks
+}
+
 fn build_structured_notes_prompt(
     live_notes: &str,
     segments: &[CanonicalSegment],
@@ -244,33 +463,47 @@ fn template_system_prompt(template: SummaryTemplate) -> &'static str {
 }
 
 const GENERAL_TEMPLATE_PROMPT: &str = "\
-You are an expert note enhancer.\n\n\
-Your job is to transform raw transcript text into clear, natural, high-quality notes.\n\n\
-Do NOT follow a fixed template or force sections.\n\n\
-Instead:\n\
-- Understand what was actually said\n\
-- Clean up messy or fragmented speech\n\
-- Remove filler words and repetition\n\
-- Rewrite content into clear, concise language\n\
-- Organize ideas naturally in a way that improves readability\n\n\
-STYLE:\n\
-- Concise and easy to scan\n\
-- Written like clean personal notes (not a formal report)\n\
-- Use bullets or short paragraphs where appropriate\n\
-- Only introduce structure if it naturally fits the content\n\n\
-BEHAVIOR:\n\
-- Preserve meaning, not wording\n\
-- Merge duplicate ideas\n\
-- Group related points if it improves clarity\n\
-- If the conversation is linear, keep it linear\n\
-- If there are clear themes, organize by themes\n\
-- If there are action items or decisions, include them naturally (do not force sections)\n\n\
-CONSTRAINTS:\n\
-- Do not hallucinate or invent information\n\
-- Do not over-structure simple conversations\n\
-- Do not add headings unless they genuinely improve clarity\n\
-- Keep the output proportional to the input (don't over-expand)\n\n\
-The goal is to produce notes that feel like a smart human listened and wrote them down cleanly.";
+You are an expert note-taker who transforms messy spoken transcripts into clear, structured summaries.\n\n\
+INPUT: A raw transcript with filler words (um, uh, like, you know), false starts, repetition, \
+and natural spoken-language messiness from one or more speakers.\n\n\
+YOUR TASK:\n\
+1. Identify the distinct topics or themes discussed.\n\
+2. Create a markdown heading (##) for each topic.\n\
+3. Under each heading, write concise bullet points capturing the key information.\n\
+4. Completely rewrite — do NOT echo or quote the transcript. Synthesize what was said.\n\
+5. Strip all filler words, false starts, and repetition.\n\n\
+FORMAT RULES:\n\
+- Output clean markdown only. No preamble, no closing remarks.\n\
+- Use ## headings for each topic or theme.\n\
+- Use bullet points (- ) under each heading.\n\
+- Keep bullets short and information-dense.\n\
+- If action items, decisions, or next steps came up, include them under a relevant heading.\n\
+- Do NOT create generic sections like 'Key Points' or 'Summary' — name headings after the actual topics.\n\
+- Do NOT reproduce speaker labels (Speaker 1, You, S1, etc.) — just capture the substance.\n\n\
+QUALITY:\n\
+- Preserve all important facts, names, numbers, and technical terms exactly.\n\
+- Merge duplicate or restated ideas into a single clear bullet.\n\
+- Keep output proportional to the input — don't pad short conversations.\n\
+- Do not hallucinate or invent information not in the transcript.";
+
+const GENERAL_CHUNK_PROMPT: &str = "\
+Summarize this portion of a transcript into concise bullet-point notes.\n\
+- Remove filler words, repetition, and false starts.\n\
+- Identify topics discussed and group bullets under short ## headings named after the topics.\n\
+- Capture facts, names, numbers, and decisions accurately.\n\
+- Do NOT reproduce speaker labels — just the substance.\n\
+- Output clean markdown only.";
+
+const GENERAL_MERGE_PROMPT: &str = "\
+You are given partial summaries of different sections of the same conversation.\n\
+Merge them into a single cohesive set of structured notes.\n\n\
+RULES:\n\
+- Combine duplicate topics under one heading.\n\
+- Remove redundant bullets that say the same thing.\n\
+- Use ## headings named after the actual topics (not generic labels like 'Key Points').\n\
+- Use bullet points (- ) under each heading.\n\
+- Keep it concise and well-organized.\n\
+- Output clean markdown only. No preamble.";
 
 const ONE_ON_ONE_TEMPLATE_PROMPT: &str = "\
 Write concise 1:1 meeting notes in markdown with these sections exactly and in this order:\n\
@@ -346,6 +579,20 @@ fn build_ollama_title_prompt(
     )
 }
 
+fn build_title_from_summary_prompt(summary_excerpt: &str, fallback: &str) -> String {
+    format!(
+        "Write a concise sidebar title for a macOS notes app based on the following meeting summary.\n\
+         Requirements:\n\
+         - 2 to 4 words\n\
+         - Title Case\n\
+         - No punctuation\n\
+         - Maximum 30 characters\n\
+         - Output the title only, nothing else\n\
+         Fallback topic: {fallback}\n\n\
+         Summary:\n{summary_excerpt}"
+    )
+}
+
 fn prepared_summary_context(live_notes: &str, segments: &[CanonicalSegment]) -> String {
     let source = if segments.is_empty() {
         live_notes.trim().to_string()
@@ -418,6 +665,7 @@ fn merge_model_structured_notes(
             action_items: collect_action_items(live_notes),
             open_questions: collect_open_questions(live_notes),
             transcript,
+            raw_notes: None,
         };
     };
 
@@ -494,6 +742,7 @@ fn parse_model_structured_notes(content: &str, transcript: &str) -> Option<Struc
         action_items,
         open_questions,
         transcript: transcript.to_string(),
+        raw_notes: None,
     })
 }
 
@@ -634,6 +883,7 @@ fn heuristic_structured_notes(
         action_items,
         open_questions,
         transcript,
+        raw_notes: None,
     }
 }
 

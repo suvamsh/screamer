@@ -48,6 +48,28 @@ pub fn brand_gold() -> Retained<NSColor> {
     srgb(0.86, 0.70, 0.34, 1.0)
 }
 
+pub fn processing_accent() -> Retained<NSColor> {
+    srgb(0.90, 0.65, 0.20, 1.0)
+}
+
+pub fn completed_accent(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.35, 0.72, 0.45, 1.0),
+        AppAppearance::Light => srgb(0.22, 0.55, 0.30, 1.0),
+    }
+}
+
+pub fn failed_accent() -> Retained<NSColor> {
+    srgb(0.82, 0.30, 0.25, 1.0)
+}
+
+pub fn processing_overlay_background(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.09, 0.08, 0.06, 0.85),
+        AppAppearance::Light => srgb(0.97, 0.95, 0.92, 0.85),
+    }
+}
+
 pub fn card_border(appearance: AppAppearance) -> Retained<NSColor> {
     match appearance {
         AppAppearance::Dark => srgb(0.86, 0.70, 0.34, 0.14),
@@ -106,6 +128,20 @@ pub fn overlay_bar_color(appearance: AppAppearance, glow: f64) -> Retained<NSCol
             let alpha = 0.66 + 0.18 * glow;
             NSColor::colorWithRed_green_blue_alpha(r, g, b, alpha)
         }
+    }
+}
+
+pub fn overlay_vision_label_text(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.55, 0.85, 1.0, 0.90),
+        AppAppearance::Light => srgb(0.10, 0.40, 0.65, 0.92),
+    }
+}
+
+pub fn overlay_vision_loading_text(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(1.0, 1.0, 1.0, 0.50),
+        AppAppearance::Light => srgb(0.08, 0.08, 0.08, 0.50),
     }
 }
 

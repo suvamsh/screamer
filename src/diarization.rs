@@ -56,6 +56,7 @@ impl DiarizationEngine for VoiceDiarizationEngine {
             .last()
             .map(|s| s.speaker)
             .unwrap_or(SpeakerLabel::S1);
+        let mut prev_speaker_turn_next = false;
 
         for segment in request.transcript_segments {
             let text = segment.text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -86,7 +87,9 @@ impl DiarizationEngine for VoiceDiarizationEngine {
                 start_ms,
                 end_ms,
                 text,
+                force_new: prev_speaker_turn_next,
             });
+            prev_speaker_turn_next = segment.speaker_turn_next;
         }
 
         turns

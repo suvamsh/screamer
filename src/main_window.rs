@@ -62,6 +62,9 @@ pub struct MainWindow {
     session_template_popup: Retained<NSPopUpButton>,
     session_structured_scroll: Retained<NSScrollView>,
     session_structured_text: Retained<NSTextView>,
+    session_reprocess_button: Retained<NSButton>,
+    session_processing_overlay: Retained<NSView>,
+    session_processing_label: Retained<NSTextField>,
     settings_view: Retained<NSView>,
     settings_model_popup: Retained<NSPopUpButton>,
     settings_hotkey_popup: Retained<NSPopUpButton>,
@@ -621,6 +624,78 @@ impl MainWindow {
         );
         session_view.addSubview(&session_structured_scroll);
 
+        // Reprocess button — shown for completed/failed sessions
+        let session_reprocess_button = primary_button(
+            mtm,
+            CGRect::new(
+                CGPoint::new(WINDOW_WIDTH - SIDEBAR_WIDTH - 172.0, WINDOW_HEIGHT - 128.0),
+                CGSize::new(132.0, 42.0),
+            ),
+            "Reprocess",
+            handler,
+            sel!(reprocessSession:),
+        );
+        session_reprocess_button.setHidden(true);
+        session_view.addSubview(&session_reprocess_button);
+
+        // Processing overlay — covers transcript + scratch pad areas during processing
+        let processing_overlay_frame = CGRect::new(
+            CGPoint::new(CONTENT_PADDING, 60.0),
+            CGSize::new(588.0, WINDOW_HEIGHT - 240.0),
+        );
+        let session_processing_overlay = surface_view(
+            mtm,
+            processing_overlay_frame,
+            &theme::processing_overlay_background(config.appearance),
+            &theme::card_border(config.appearance),
+            18.0,
+        );
+        session_processing_overlay.setHidden(true);
+
+        let spinner_label = text_label(
+            mtm,
+            "◉",
+            CGRect::new(
+                CGPoint::new(0.0, processing_overlay_frame.size.height / 2.0 + 10.0),
+                CGSize::new(processing_overlay_frame.size.width, 28.0),
+            ),
+            22.0,
+            &theme::processing_accent(),
+            false,
+        );
+        spinner_label.setAlignment(NSTextAlignment::Center);
+        session_processing_overlay.addSubview(&spinner_label);
+
+        let session_processing_label = text_label(
+            mtm,
+            "Processing session\u{2026}",
+            CGRect::new(
+                CGPoint::new(0.0, processing_overlay_frame.size.height / 2.0 - 18.0),
+                CGSize::new(processing_overlay_frame.size.width, 22.0),
+            ),
+            15.0,
+            &theme::secondary_text(config.appearance),
+            true,
+        );
+        session_processing_label.setAlignment(NSTextAlignment::Center);
+        session_processing_overlay.addSubview(&session_processing_label);
+
+        let processing_hint = text_label(
+            mtm,
+            "Generating summary from transcript and notes",
+            CGRect::new(
+                CGPoint::new(0.0, processing_overlay_frame.size.height / 2.0 - 42.0),
+                CGSize::new(processing_overlay_frame.size.width, 18.0),
+            ),
+            12.0,
+            &theme::secondary_text(config.appearance),
+            false,
+        );
+        processing_hint.setAlignment(NSTextAlignment::Center);
+        session_processing_overlay.addSubview(&processing_hint);
+
+        session_view.addSubview(&session_processing_overlay);
+
         let settings_view = NSView::new(mtm);
         settings_view.setFrame(content_bounds());
         settings_view.setHidden(true);
@@ -882,6 +957,9 @@ impl MainWindow {
             session_template_popup,
             session_structured_scroll,
             session_structured_text,
+            session_reprocess_button,
+            session_processing_overlay,
+            session_processing_label,
             settings_view,
             settings_model_popup,
             settings_hotkey_popup,
@@ -1002,6 +1080,10 @@ impl MainWindow {
         self.sync_home(&config);
         self.sync_session(&config);
         self.persist_editor_if_needed();
+    }
+
+    pub fn current_session_id(&self) -> i64 {
+        self.current_session_id.get()
     }
 
     pub fn session_id_for_sidebar_index(&self, index: usize) -> Option<i64> {
@@ -1128,7 +1210,8 @@ impl MainWindow {
         if session_changed {
             self.loaded_session_id.set(session.id);
             self.last_rendered_segment_count.set(usize::MAX);
-            self.last_rendered_segment_signature.replace(String::new());
+            self.last_rendered_segment_signature
+                .replace("__invalidated__".to_string());
             self.session_structured_text
                 .setString(&NSString::from_str(&session.structured_notes));
             self.last_persisted_notes
@@ -1186,10 +1269,58 @@ impl MainWindow {
         self.session_warning.setStringValue(&NSString::from_str(
             session.warning.as_deref().unwrap_or(""),
         ));
-        self.session_stop_button.setEnabled(matches!(
+        let is_recording = matches!(
             session.state,
             screamer_core::ambient::AmbientSessionState::Recording
-        ));
+        );
+        let is_processing = matches!(
+            session.state,
+            screamer_core::ambient::AmbientSessionState::Processing
+        );
+        let is_finished = matches!(
+            session.state,
+            screamer_core::ambient::AmbientSessionState::Completed
+                | screamer_core::ambient::AmbientSessionState::Failed
+        );
+
+        // Stop button visible only while recording
+        self.session_stop_button.setEnabled(is_recording);
+        self.session_stop_button.setHidden(!is_recording);
+
+        // Reprocess button visible only after session is finished
+        self.session_reprocess_button.setHidden(!is_finished);
+        self.session_reprocess_button.setEnabled(is_finished);
+
+        // Processing overlay covers transcript + scratch pad area
+        self.session_processing_overlay.setHidden(!is_processing);
+
+        // Animate the processing label text with a rotating indicator
+        if is_processing {
+            let tick = (session.elapsed_ms / 400) % 4;
+            let dots = match tick {
+                0 => "Processing session",
+                1 => "Processing session.",
+                2 => "Processing session..",
+                _ => "Processing session...",
+            };
+            self.session_processing_label
+                .setStringValue(&NSString::from_str(dots));
+        }
+
+        // Lock scratch pad during processing (read-only); editable otherwise
+        self.scratch_pad_text.setEditable(!is_processing);
+
+        // Status label gets color treatment for processing
+        if is_processing {
+            self.session_status
+                .setTextColor(Some(&theme::processing_accent()));
+            self.session_status
+                .setStringValue(&NSString::from_str("◉ Processing\u{2026}"));
+        } else {
+            let appearance = self.config.borrow().appearance;
+            self.session_status
+                .setTextColor(Some(&theme::secondary_text(appearance)));
+        }
 
         let template_index = SummaryTemplate::all()
             .iter()
@@ -1197,10 +1328,7 @@ impl MainWindow {
             .unwrap_or(0);
         self.session_template_popup
             .selectItemAtIndex(template_index as isize);
-        self.session_template_popup.setEnabled(matches!(
-            session.state,
-            screamer_core::ambient::AmbientSessionState::Recording
-        ));
+        self.session_template_popup.setEnabled(is_recording);
     }
 
     fn persist_editor_if_needed(&self) {
@@ -1401,14 +1529,23 @@ fn rebuild_session_button_list(
         );
         container.addSubview(&card);
 
+        let accent_color = match session.state {
+            screamer_core::ambient::AmbientSessionState::Recording => theme::brand_gold(),
+            screamer_core::ambient::AmbientSessionState::Processing => theme::processing_accent(),
+            screamer_core::ambient::AmbientSessionState::Completed => {
+                theme::completed_accent(appearance)
+            }
+            screamer_core::ambient::AmbientSessionState::Failed => theme::failed_accent(),
+            _ => theme::brand_gold(),
+        };
         let accent = surface_view(
             mtm,
             CGRect::new(
                 CGPoint::new(14.0, frame.size.height - 20.0),
                 CGSize::new(8.0, 8.0),
             ),
-            &theme::brand_gold(),
-            &theme::brand_gold(),
+            &accent_color,
+            &accent_color,
             4.0,
         );
         card.addSubview(&accent);
@@ -1890,11 +2027,16 @@ fn session_preview_line(session: &SessionSummary) -> String {
 }
 
 fn session_meta_line(session: &SessionSummary) -> String {
-    format!(
-        "{} · {}",
-        status_label(session.state),
-        format_relative_time(session.updated_at_ms)
-    )
+    match session.state {
+        screamer_core::ambient::AmbientSessionState::Processing => {
+            "◉ Processing\u{2026}".to_string()
+        }
+        _ => format!(
+            "{} · {}",
+            status_label(session.state),
+            format_relative_time(session.updated_at_ms)
+        ),
+    }
 }
 
 fn format_relative_time(timestamp_ms: i64) -> String {

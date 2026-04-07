@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_BUNDLED_SUMMARY_MODEL_ID: &str = "gemma-3-1b-it-q4_k_m";
 pub const DEFAULT_BUNDLED_SUMMARY_MODEL_FILENAME: &str = "gemma-3-1b-it-q4_k_m.gguf";
 
+pub const VISION_MODEL_FILENAME: &str = "gemma-3-4b-it-q4.gguf";
+pub const VISION_MMPROJ_FILENAME: &str = "mmproj-gemma-3-4b-it-f16.gguf";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SummaryModelInfo {
     pub id: &'static str,
@@ -74,6 +77,18 @@ pub fn current_bundle_models_dir() -> Option<PathBuf> {
 
 pub fn current_bundle_summary_models_dir() -> Option<PathBuf> {
     current_bundle_models_dir().map(|dir| dir.join("summary"))
+}
+
+pub fn find_vision_model() -> Option<(PathBuf, PathBuf)> {
+    let bundle_dir = current_bundle_summary_models_dir();
+    let local_dir = PathBuf::from("models").join("summary");
+
+    let model_path = resolve_existing_path(bundle_dir.as_deref(), VISION_MODEL_FILENAME)
+        .or_else(|| resolve_existing_path(Some(&local_dir), VISION_MODEL_FILENAME))?;
+    let mmproj_path = resolve_existing_path(bundle_dir.as_deref(), VISION_MMPROJ_FILENAME)
+        .or_else(|| resolve_existing_path(Some(&local_dir), VISION_MMPROJ_FILENAME))?;
+
+    Some((model_path, mmproj_path))
 }
 
 fn resolve_existing_path(base: Option<&Path>, filename: &str) -> Option<PathBuf> {
