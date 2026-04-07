@@ -4,59 +4,76 @@ use objc2_foundation::MainThreadMarker;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-// Modifier flags for detecting Option tap
-const OPTION_MODIFIER: u64 = 0x00080000;
-
 pub struct Hotkey {
-    is_pressed: Arc<AtomicBool>,
-    selected_index: Arc<AtomicUsize>,
+    dictation_pressed: Arc<AtomicBool>,
+    vision_pressed: Arc<AtomicBool>,
+    dictation_index: Arc<AtomicUsize>,
+    vision_index: Arc<AtomicUsize>,
 }
 
 impl Hotkey {
     pub fn new(config: &Config) -> Self {
         Self {
-            is_pressed: Arc::new(AtomicBool::new(false)),
-            selected_index: Arc::new(AtomicUsize::new(hotkey_index_for_id(&config.hotkey))),
+            dictation_pressed: Arc::new(AtomicBool::new(false)),
+            vision_pressed: Arc::new(AtomicBool::new(false)),
+            dictation_index: Arc::new(AtomicUsize::new(hotkey_index_for_id(&config.hotkey))),
+            vision_index: Arc::new(AtomicUsize::new(hotkey_index_for_id(&config.vision_hotkey))),
         }
     }
 
     pub fn set_hotkey(&self, hotkey_id: &str) {
         let index = hotkey_index_for_id(hotkey_id);
         let hotkey_info = HOTKEYS.get(index).unwrap_or(&HOTKEYS[0]);
-        self.selected_index.store(index, Ordering::Relaxed);
+        self.dictation_index.store(index, Ordering::Relaxed);
         eprintln!(
-            "[screamer] Updated hotkey to: {} (modifier=0x{:x}, device=0x{:x})",
+            "[screamer] Updated dictation hotkey to: {} (modifier=0x{:x}, device=0x{:x})",
+            hotkey_info.label, hotkey_info.modifier_flag, hotkey_info.device_flag
+        );
+    }
+
+    pub fn set_vision_hotkey(&self, hotkey_id: &str) {
+        let index = hotkey_index_for_id(hotkey_id);
+        let hotkey_info = HOTKEYS.get(index).unwrap_or(&HOTKEYS[2]);
+        self.vision_index.store(index, Ordering::Relaxed);
+        eprintln!(
+            "[screamer] Updated vision hotkey to: {} (modifier=0x{:x}, device=0x{:x})",
             hotkey_info.label, hotkey_info.modifier_flag, hotkey_info.device_flag
         );
     }
 
     /// Start listening using NSEvent global monitor on the main thread.
     ///
-    /// Three callbacks:
-    /// - `on_press` / `on_release`: dictation hotkey (configurable single modifier)
-    /// - `on_screenshot_tap`: fires when Option is pressed while dictation is active
+    /// Two independent push-to-talk keys:
+    /// - Dictation: `on_dictation_press` / `on_dictation_release` (configurable key)
+    /// - Vision: `on_vision_press` / `on_vision_release` (configurable key, default Left Option)
     pub fn start_on_main_thread(
         &self,
         _mtm: MainThreadMarker,
-        on_press: impl Fn() + 'static,
-        on_release: impl Fn() + 'static,
-        on_screenshot_tap: impl Fn() + 'static,
+        on_dictation_press: impl Fn() + 'static,
+        on_dictation_release: impl Fn() + 'static,
+        on_vision_press: impl Fn() + 'static,
+        on_vision_release: impl Fn() + 'static,
     ) {
-        let is_pressed = self.is_pressed.clone();
-        let selected_index = self.selected_index.clone();
+        let dictation_pressed = self.dictation_pressed.clone();
+        let vision_pressed = self.vision_pressed.clone();
+        let dictation_index = self.dictation_index.clone();
+        let vision_index = self.vision_index.clone();
 
-        // Track whether Option was down on the previous event so we detect edges.
-        let option_was_down = Arc::new(AtomicBool::new(false));
-
-        let hotkey_info = HOTKEYS
-            .get(selected_index.load(Ordering::Relaxed))
+        let dict_info = HOTKEYS
+            .get(dictation_index.load(Ordering::Relaxed))
             .unwrap_or(&HOTKEYS[0]);
+        let vis_info = HOTKEYS
+            .get(vision_index.load(Ordering::Relaxed))
+            .unwrap_or(&HOTKEYS[2]);
 
         eprintln!(
-            "[screamer] Hotkey configured: {} (modifier=0x{:x}, device=0x{:x})",
-            hotkey_info.label, hotkey_info.modifier_flag, hotkey_info.device_flag
+            "[screamer] Dictation hotkey: {} (modifier=0x{:x}, device=0x{:x})",
+            dict_info.label, dict_info.modifier_flag, dict_info.device_flag
         );
-        eprintln!("[screamer] Screenshot tap: Option (while recording)");
+        eprintln!(
+            "[screamer] Vision hotkey: {} (modifier=0x{:x}, device=0x{:x})",
+            vis_info.label, vis_info.modifier_flag, vis_info.device_flag
+        );
 
         // NSEventMaskFlagsChanged = 1 << 12 = 4096
         let mask: u64 = 1 << 12;
@@ -66,46 +83,68 @@ impl Hotkey {
                 return;
             }
             let flags: u64 = unsafe { msg_send![event, modifierFlags] };
-            let hotkey_info = HOTKEYS
-                .get(selected_index.load(Ordering::Relaxed))
+
+            // ── Dictation hotkey ──
+            let dict_info = HOTKEYS
+                .get(dictation_index.load(Ordering::Relaxed))
                 .unwrap_or(&HOTKEYS[0]);
 
-            // ── Dictation hotkey (configurable modifier) ──
-            let modifier_down = (flags & hotkey_info.modifier_flag) != 0;
-            let key_down = if hotkey_info.device_flag != 0 {
-                modifier_down && (flags & hotkey_info.device_flag) != 0
+            let dict_modifier_down = (flags & dict_info.modifier_flag) != 0;
+            let dict_key_down = if dict_info.device_flag != 0 {
+                dict_modifier_down && (flags & dict_info.device_flag) != 0
             } else {
-                modifier_down
+                dict_modifier_down
             };
 
-            let was_pressed = is_pressed.load(Ordering::SeqCst);
+            let dict_was = dictation_pressed.load(Ordering::SeqCst);
 
-            if key_down && !was_pressed {
+            if dict_key_down && !dict_was {
                 eprintln!(
-                    "[screamer] Hotkey {} PRESSED (flags=0x{:x})",
-                    hotkey_info.label, flags
+                    "[screamer] Dictation {} PRESSED (flags=0x{:x})",
+                    dict_info.label, flags
                 );
-                is_pressed.store(true, Ordering::SeqCst);
-                on_press();
-            } else if !key_down && was_pressed {
+                dictation_pressed.store(true, Ordering::SeqCst);
+                on_dictation_press();
+            } else if !dict_key_down && dict_was {
                 eprintln!(
-                    "[screamer] Hotkey {} RELEASED (flags=0x{:x})",
-                    hotkey_info.label, flags
+                    "[screamer] Dictation {} RELEASED (flags=0x{:x})",
+                    dict_info.label, flags
                 );
-                is_pressed.store(false, Ordering::SeqCst);
-                on_release();
+                dictation_pressed.store(false, Ordering::SeqCst);
+                on_dictation_release();
             }
 
-            // ── Option tap detection (only while recording) ──
-            let option_down = (flags & OPTION_MODIFIER) != 0;
-            let option_was = option_was_down.swap(option_down, Ordering::SeqCst);
+            // ── Vision hotkey ──
+            let vis_info = HOTKEYS
+                .get(vision_index.load(Ordering::Relaxed))
+                .unwrap_or(&HOTKEYS[2]);
 
-            if option_down && !option_was && is_pressed.load(Ordering::SeqCst) {
+            let vis_modifier_down = (flags & vis_info.modifier_flag) != 0;
+            let vis_key_down = if vis_info.device_flag != 0 {
+                vis_modifier_down && (flags & vis_info.device_flag) != 0
+            } else {
+                vis_modifier_down
+            };
+
+            let vis_was = vision_pressed.load(Ordering::SeqCst);
+
+            if vis_key_down && !vis_was {
+                // Don't activate vision if dictation is already active
+                if !dictation_pressed.load(Ordering::SeqCst) {
+                    eprintln!(
+                        "[screamer] Vision {} PRESSED (flags=0x{:x})",
+                        vis_info.label, flags
+                    );
+                    vision_pressed.store(true, Ordering::SeqCst);
+                    on_vision_press();
+                }
+            } else if !vis_key_down && vis_was {
                 eprintln!(
-                    "[screamer] Option tapped during recording (flags=0x{:x})",
-                    flags
+                    "[screamer] Vision {} RELEASED (flags=0x{:x})",
+                    vis_info.label, flags
                 );
-                on_screenshot_tap();
+                vision_pressed.store(false, Ordering::SeqCst);
+                on_vision_release();
             }
         });
 

@@ -309,6 +309,11 @@ fn menu_handler_class() -> &'static AnyClass {
                 select_hotkey_popup_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
             builder.add_method(
+                sel!(selectVisionHotkeyPopup:),
+                select_vision_hotkey_popup_action
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
                 sel!(selectPositionPopup:),
                 select_position_popup_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
@@ -475,6 +480,15 @@ extern "C" fn select_model_popup_action(_this: *mut AnyObject, _sel: Sel, sender
 extern "C" fn select_hotkey_popup_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
     let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
     apply_hotkey_selection(index as usize);
+}
+
+extern "C" fn select_vision_hotkey_popup_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    sender: *mut AnyObject,
+) {
+    let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+    apply_vision_hotkey_selection(index as usize);
 }
 
 extern "C" fn select_position_popup_action(
@@ -672,6 +686,34 @@ fn apply_hotkey_selection(index: usize) {
     HOTKEY_MONITOR.with(|cell| {
         if let Some(hotkey) = cell.borrow().as_ref() {
             hotkey.set_hotkey(hotkey_info.id);
+        }
+    });
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        rebuild_status_menu(mtm);
+    }
+    sync_settings_window(&config);
+}
+
+fn apply_vision_hotkey_selection(index: usize) {
+    let Some(hotkey_info) = HOTKEYS.get(index) else {
+        sync_settings_window(&Config::load());
+        return;
+    };
+
+    let mut config = Config::load();
+    if config.vision_hotkey == hotkey_info.id {
+        sync_settings_window(&config);
+        return;
+    }
+
+    eprintln!("[screamer] Vision hotkey selected: {}", hotkey_info.id);
+    config.vision_hotkey = hotkey_info.id.to_string();
+    config.save();
+
+    HOTKEY_MONITOR.with(|cell| {
+        if let Some(hotkey) = cell.borrow().as_ref() {
+            hotkey.set_vision_hotkey(hotkey_info.id);
         }
     });
 
@@ -1280,173 +1322,144 @@ impl App {
     }
 
     pub fn start(&self, mtm: MainThreadMarker) {
-        let ambient_controller = self.ambient_controller.clone();
-        let sound_player_press = self.sound_player.clone();
-        let is_rec_press = self.is_recording.clone();
-        let is_rec_release = self.is_recording.clone();
-        let rec_press = self.recorder.clone();
-        let rec_release = self.recorder.clone();
-        let trans_press = self.transcriber.clone();
-        let trans_release = self.transcriber.clone();
-        let live_transcription_enabled_press = self.live_transcription_enabled.clone();
-        let sound_effects_enabled_press = self.sound_effects_enabled.clone();
-        let sound_effects_enabled_release = self.sound_effects_enabled.clone();
-        let live_transcript_press = self.live_transcript.clone();
-        let live_transcript_release = self.live_transcript.clone();
-        let pending_completion_sound_release = self.pending_completion_sound.clone();
-        let recording_session_press = self.recording_session.clone();
+        let hotkey = self.hotkey.clone();
 
-        // Shared screenshot path — set by Option tap, consumed by release
+        // ── Shared state clones for dictation ──
+        let ambient_controller = self.ambient_controller.clone();
+        let sound_player_dict_press = self.sound_player.clone();
+        let is_rec_dict_press = self.is_recording.clone();
+        let is_rec_dict_release = self.is_recording.clone();
+        let rec_dict_press = self.recorder.clone();
+        let rec_dict_release = self.recorder.clone();
+        let trans_dict_press = self.transcriber.clone();
+        let trans_dict_release = self.transcriber.clone();
+        let live_enabled_dict = self.live_transcription_enabled.clone();
+        let sfx_dict_press = self.sound_effects_enabled.clone();
+        let sfx_dict_release = self.sound_effects_enabled.clone();
+        let live_transcript_dict_press = self.live_transcript.clone();
+        let live_transcript_dict_release = self.live_transcript.clone();
+        let pending_sound_dict = self.pending_completion_sound.clone();
+        let session_dict = self.recording_session.clone();
+        let vision_state_dict = self.vision_overlay_state.clone();
+
+        // ── Shared state clones for vision ──
+        let is_rec_vis_press = self.is_recording.clone();
+        let is_rec_vis_release = self.is_recording.clone();
+        let rec_vis_press = self.recorder.clone();
+        let rec_vis_release = self.recorder.clone();
+        let trans_vis_press = self.transcriber.clone();
+        let trans_vis_release = self.transcriber.clone();
+        let live_enabled_vis = self.live_transcription_enabled.clone();
+        let sfx_vis_press = self.sound_effects_enabled.clone();
+        let sfx_vis_release = self.sound_effects_enabled.clone();
+        let sound_player_vis_press = self.sound_player.clone();
+        let live_transcript_vis_press = self.live_transcript.clone();
+        let live_transcript_vis_release = self.live_transcript.clone();
+        let pending_sound_vis = self.pending_completion_sound.clone();
+        let session_vis = self.recording_session.clone();
+        let vision_state_vis_press = self.vision_overlay_state.clone();
+        let vision_state_vis_release = self.vision_overlay_state.clone();
         let vision_screenshot: Arc<Mutex<Option<std::path::PathBuf>>> =
             Arc::new(Mutex::new(None));
-        let vision_screenshot_tap = vision_screenshot.clone();
         let vision_screenshot_release = vision_screenshot.clone();
-        let vision_state_press = self.vision_overlay_state.clone();
-        let vision_state_release = self.vision_overlay_state.clone();
-
-        let hotkey = self.hotkey.clone();
 
         hotkey.start_on_main_thread(
             mtm,
-            // ── Press (Control) ──
+            // ── Dictation press ──
             move || {
                 // Clear any previous vision response
-                if let Ok(mut vs) = vision_state_press.lock() {
+                if let Ok(mut vs) = vision_state_dict.lock() {
                     *vs = crate::overlay::VisionOverlayState::Hidden;
-                }
-                // Clear any stale screenshot from a previous session
-                if let Ok(mut ss) = vision_screenshot_tap.lock() {
-                    if let Some(old) = ss.take() {
-                        let _ = std::fs::remove_file(&old);
-                    }
                 }
                 if ambient_controller.active_snapshot().is_some() {
                     eprintln!("[screamer] Ignoring dictation hotkey while ambient session is active");
                     return;
                 }
-                if is_rec_press
+                if is_rec_dict_press
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
                     if !permissions::has_accessibility_permission() {
-                        eprintln!(
-                            "[screamer] Accessibility permission missing; blocking dictation before recording starts"
-                        );
+                        eprintln!("[screamer] Accessibility permission missing");
                         permissions::prompt_for_accessibility_permission();
-                        is_rec_press.store(false, Ordering::SeqCst);
+                        is_rec_dict_press.store(false, Ordering::SeqCst);
                         show_accessibility_window();
                         return;
                     }
-
                     match permissions::prepare_microphone_permission() {
                         permissions::MicrophonePermissionOutcome::Granted => {}
                         permissions::MicrophonePermissionOutcome::Prompted => {
-                            eprintln!(
-                                "[screamer] Requested microphone permission; waiting for the user to respond"
-                            );
-                            is_rec_press.store(false, Ordering::SeqCst);
+                            is_rec_dict_press.store(false, Ordering::SeqCst);
                             return;
                         }
                         permissions::MicrophonePermissionOutcome::Denied => {
-                            eprintln!(
-                                "[screamer] Microphone permission missing; blocking recording before capture starts"
-                            );
-                            is_rec_press.store(false, Ordering::SeqCst);
+                            is_rec_dict_press.store(false, Ordering::SeqCst);
                             show_missing_microphone_permission_guidance();
                             return;
                         }
                     }
 
-                    let session = recording_session_press.fetch_add(1, Ordering::SeqCst) + 1;
-                    if let Ok(mut transcript) = live_transcript_press.lock() {
-                        transcript.clear();
-                    }
-                    rec_press.reset_buffers();
+                    let session = session_dict.fetch_add(1, Ordering::SeqCst) + 1;
+                    if let Ok(mut t) = live_transcript_dict_press.lock() { t.clear(); }
+                    rec_dict_press.reset_buffers();
 
-                    if sound_effects_enabled_press.load(Ordering::Relaxed) {
-                        sound_player_press.play_recording_start();
+                    if sfx_dict_press.load(Ordering::Relaxed) {
+                        sound_player_dict_press.play_recording_start();
                     }
                     start_recording_capture(
-                        rec_press.clone(),
-                        trans_press.clone(),
-                        is_rec_press.clone(),
-                        live_transcription_enabled_press.clone(),
-                        live_transcript_press.clone(),
-                        recording_session_press.clone(),
+                        rec_dict_press.clone(),
+                        trans_dict_press.clone(),
+                        is_rec_dict_press.clone(),
+                        live_enabled_dict.clone(),
+                        live_transcript_dict_press.clone(),
+                        session_dict.clone(),
                         session,
                     );
-                    eprintln!("[screamer] Recording armed");
+                    eprintln!("[screamer] Dictation recording armed");
                 }
             },
-            // ── Release (Control) ──
+            // ── Dictation release ──
             move || {
-                if is_rec_release
+                if is_rec_dict_release
                     .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
                     let release_t0 = std::time::Instant::now();
-                    let samples = rec_release.stop();
-                    if let Ok(mut transcript) = live_transcript_release.lock() {
-                        transcript.clear();
-                    }
-                    eprintln!("[screamer] Recording stopped, {} samples", samples.len());
-
-                    // Check if a screenshot was captured during this recording
-                    let screenshot_path = vision_screenshot_release
-                        .lock()
-                        .ok()
-                        .and_then(|mut ss| ss.take());
-                    let is_vision = screenshot_path.is_some();
+                    let samples = rec_dict_release.stop();
+                    if let Ok(mut t) = live_transcript_dict_release.lock() { t.clear(); }
+                    eprintln!("[screamer] Dictation stopped, {} samples", samples.len());
 
                     let transcribe_window = match prepare_final_transcription(&samples) {
                         FinalTranscriptionAction::SkipSilence => {
-                            eprintln!("[screamer] Recording was silence, skipping transcription");
-                            if sound_effects_enabled_release.load(Ordering::Relaxed) {
-                                pending_completion_sound_release.store(true, Ordering::SeqCst);
+                            eprintln!("[screamer] Recording was silence, skipping");
+                            if sfx_dict_release.load(Ordering::Relaxed) {
+                                pending_sound_dict.store(true, Ordering::SeqCst);
                             }
                             return;
                         }
                         FinalTranscriptionAction::SkipTooShort { trimmed_len } => {
-                            eprintln!(
-                                "[screamer] Recording too short after trimming silence ({} samples), skipping",
-                                trimmed_len
-                            );
-                            if sound_effects_enabled_release.load(Ordering::Relaxed) {
-                                pending_completion_sound_release.store(true, Ordering::SeqCst);
+                            eprintln!("[screamer] Recording too short ({} samples), skipping", trimmed_len);
+                            if sfx_dict_release.load(Ordering::Relaxed) {
+                                pending_sound_dict.store(true, Ordering::SeqCst);
                             }
                             return;
                         }
                         FinalTranscriptionAction::Ready(window) => {
                             let trimmed_len = window.range.end - window.range.start;
                             if trimmed_len != samples.len() {
-                                eprintln!(
-                                    "[screamer] Trimmed silence: {} -> {} samples",
-                                    samples.len(),
-                                    trimmed_len
-                                );
+                                eprintln!("[screamer] Trimmed silence: {} -> {} samples", samples.len(), trimmed_len);
                             }
                             if matches!(window.kind, FinalSpeechWindowKind::ShortUtterance) {
-                                eprintln!(
-                                    "[screamer] Salvaging brief utterance with relaxed speech gate ({} samples)",
-                                    trimmed_len
-                                );
+                                eprintln!("[screamer] Salvaging brief utterance ({} samples)", trimmed_len);
                             }
                             window
                         }
                     };
 
-                    let t = trans_release.clone();
-                    let pending_completion_sound = pending_completion_sound_release.clone();
-                    let sound_effects_enabled = sound_effects_enabled_release.clone();
+                    let t = trans_dict_release.clone();
+                    let pending_sound = pending_sound_dict.clone();
+                    let sfx = sfx_dict_release.clone();
                     let stop_ms = release_t0.elapsed().as_millis();
-                    let vision_state = vision_state_release.clone();
-
-                    if is_vision {
-                        // Set loading state before spawning thread
-                        if let Ok(mut vs) = vision_state.lock() {
-                            *vs = crate::overlay::VisionOverlayState::Loading;
-                        }
-                    }
 
                     std::thread::spawn(move || {
                         match t.transcribe_profiled(&samples[transcribe_window.range]) {
@@ -1458,8 +1471,168 @@ impl App {
                                 );
                                 logging::log_transcript("Final transcript", &result.text);
 
+                                if !permissions::has_accessibility_permission() {
+                                    eprintln!("[screamer] Accessibility permission missing; paste may fail");
+                                }
+
+                                let paste_t0 = std::time::Instant::now();
+                                let paste_result = crate::paster::paste(&result.text);
+                                let paste_ms = paste_t0.elapsed().as_millis();
+
+                                match paste_result {
+                                    Ok(()) => {
+                                        eprintln!(
+                                            "[screamer] Latency: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
+                                            stop_ms,
+                                            result.profile.state_acquire.as_millis(),
+                                            result.profile.inference.as_millis(),
+                                            result.profile.extract.as_millis(),
+                                            paste_ms,
+                                            release_t0.elapsed().as_millis()
+                                        );
+                                    }
+                                    Err(err) => {
+                                        eprintln!("[screamer] Paste failed after {}ms: {}", paste_ms, err);
+                                    }
+                                }
+                            }
+                            Ok(_) => eprintln!("[screamer] Empty transcription, skipping"),
+                            Err(e) => eprintln!("[screamer] Transcription error: {}", e),
+                        }
+
+                        if sfx.load(Ordering::Relaxed) {
+                            pending_sound.store(true, Ordering::SeqCst);
+                        }
+                    });
+                }
+            },
+            // ── Vision press: capture screenshot, then start recording ──
+            move || {
+                // Clear any previous vision response
+                if let Ok(mut vs) = vision_state_vis_press.lock() {
+                    *vs = crate::overlay::VisionOverlayState::Hidden;
+                }
+                // Capture screenshot immediately
+                match crate::screenshot::capture_screen() {
+                    Ok(path) => {
+                        eprintln!("[screamer] Vision screenshot captured: {}", path.display());
+                        if let Ok(mut ss) = vision_screenshot.lock() {
+                            if let Some(old) = ss.take() {
+                                let _ = std::fs::remove_file(&old);
+                            }
+                            *ss = Some(path);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("[screamer] Vision screenshot failed: {err}");
+                        return;
+                    }
+                }
+
+                // Start recording (same flow as dictation)
+                if is_rec_vis_press
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    match permissions::prepare_microphone_permission() {
+                        permissions::MicrophonePermissionOutcome::Granted => {}
+                        permissions::MicrophonePermissionOutcome::Prompted => {
+                            is_rec_vis_press.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                        permissions::MicrophonePermissionOutcome::Denied => {
+                            is_rec_vis_press.store(false, Ordering::SeqCst);
+                            show_missing_microphone_permission_guidance();
+                            return;
+                        }
+                    }
+
+                    let session = session_vis.fetch_add(1, Ordering::SeqCst) + 1;
+                    if let Ok(mut t) = live_transcript_vis_press.lock() { t.clear(); }
+                    rec_vis_press.reset_buffers();
+
+                    if sfx_vis_press.load(Ordering::Relaxed) {
+                        sound_player_vis_press.play_recording_start();
+                    }
+                    start_recording_capture(
+                        rec_vis_press.clone(),
+                        trans_vis_press.clone(),
+                        is_rec_vis_press.clone(),
+                        live_enabled_vis.clone(),
+                        live_transcript_vis_press.clone(),
+                        session_vis.clone(),
+                        session,
+                    );
+                    eprintln!("[screamer] Vision recording armed");
+                }
+            },
+            // ── Vision release: stop recording, transcribe, send to LLM ──
+            move || {
+                if is_rec_vis_release
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let release_t0 = std::time::Instant::now();
+                    let samples = rec_vis_release.stop();
+                    if let Ok(mut t) = live_transcript_vis_release.lock() { t.clear(); }
+                    eprintln!("[screamer] Vision recording stopped, {} samples", samples.len());
+
+                    let screenshot_path = vision_screenshot_release
+                        .lock()
+                        .ok()
+                        .and_then(|mut ss| ss.take());
+
+                    let transcribe_window = match prepare_final_transcription(&samples) {
+                        FinalTranscriptionAction::SkipSilence => {
+                            eprintln!("[screamer] Vision recording was silence, skipping");
+                            if sfx_vis_release.load(Ordering::Relaxed) {
+                                pending_sound_vis.store(true, Ordering::SeqCst);
+                            }
+                            if let Ok(mut vs) = vision_state_vis_release.lock() {
+                                *vs = crate::overlay::VisionOverlayState::Hidden;
+                            }
+                            return;
+                        }
+                        FinalTranscriptionAction::SkipTooShort { trimmed_len } => {
+                            eprintln!("[screamer] Vision recording too short ({} samples), skipping", trimmed_len);
+                            if sfx_vis_release.load(Ordering::Relaxed) {
+                                pending_sound_vis.store(true, Ordering::SeqCst);
+                            }
+                            if let Ok(mut vs) = vision_state_vis_release.lock() {
+                                *vs = crate::overlay::VisionOverlayState::Hidden;
+                            }
+                            return;
+                        }
+                        FinalTranscriptionAction::Ready(window) => {
+                            let trimmed_len = window.range.end - window.range.start;
+                            if trimmed_len != samples.len() {
+                                eprintln!("[screamer] Trimmed silence: {} -> {} samples", samples.len(), trimmed_len);
+                            }
+                            window
+                        }
+                    };
+
+                    // Set loading state
+                    if let Ok(mut vs) = vision_state_vis_release.lock() {
+                        *vs = crate::overlay::VisionOverlayState::Loading;
+                    }
+
+                    let t = trans_vis_release.clone();
+                    let pending_sound = pending_sound_vis.clone();
+                    let sfx = sfx_vis_release.clone();
+                    let vision_state = vision_state_vis_release.clone();
+
+                    std::thread::spawn(move || {
+                        match t.transcribe_profiled(&samples[transcribe_window.range]) {
+                            Ok(result) if !result.text.is_empty() => {
+                                eprintln!(
+                                    "[screamer] Vision transcribed in {}ms ({} chars)",
+                                    result.profile.total.as_millis(),
+                                    result.text.chars().count()
+                                );
+                                logging::log_transcript("Vision transcript", &result.text);
+
                                 if let Some(screenshot_path) = screenshot_path {
-                                    // ── Vision path: send to multimodal model ──
                                     eprintln!("[screamer] Vision: asking model about screenshot...");
                                     let vision_t0 = std::time::Instant::now();
                                     match crate::vision::ask_about_screen(
@@ -1474,98 +1647,44 @@ impl App {
                                                 response
                                             );
                                             if let Ok(mut vs) = vision_state.lock() {
-                                                *vs = crate::overlay::VisionOverlayState::Response(
-                                                    response,
-                                                );
+                                                *vs = crate::overlay::VisionOverlayState::Response(response);
                                             }
                                         }
                                         Err(err) => {
                                             eprintln!("[screamer] Vision model error: {err}");
                                             if let Ok(mut vs) = vision_state.lock() {
-                                                *vs =
-                                                    crate::overlay::VisionOverlayState::Error(err);
+                                                *vs = crate::overlay::VisionOverlayState::Error(err);
                                             }
                                         }
                                     }
                                     let _ = std::fs::remove_file(&screenshot_path);
                                 } else {
-                                    // ── Normal dictation path: paste text ──
-                                    if !permissions::has_accessibility_permission() {
-                                        eprintln!(
-                                            "[screamer] Accessibility permission missing; automatic paste may fail for this build"
-                                        );
-                                    }
-
-                                    let paste_t0 = std::time::Instant::now();
-                                    let paste_result = crate::paster::paste(&result.text);
-                                    let paste_ms = paste_t0.elapsed().as_millis();
-
-                                    match paste_result {
-                                        Ok(()) => {
-                                            eprintln!(
-                                                "[screamer] Latency breakdown: stop={}ms | state={}ms | infer={}ms | extract={}ms | paste={}ms | total={}ms",
-                                                stop_ms,
-                                                result.profile.state_acquire.as_millis(),
-                                                result.profile.inference.as_millis(),
-                                                result.profile.extract.as_millis(),
-                                                paste_ms,
-                                                release_t0.elapsed().as_millis()
-                                            );
-                                        }
-                                        Err(err) => {
-                                            eprintln!(
-                                                "[screamer] Paste failed after {}ms: {}",
-                                                paste_ms, err
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(_) => {
-                                eprintln!("[screamer] Empty transcription, skipping");
-                                if is_vision {
+                                    eprintln!("[screamer] Vision release but no screenshot found");
                                     if let Ok(mut vs) = vision_state.lock() {
                                         *vs = crate::overlay::VisionOverlayState::Hidden;
                                     }
                                 }
                             }
+                            Ok(_) => {
+                                eprintln!("[screamer] Vision: empty transcription, skipping");
+                                if let Ok(mut vs) = vision_state.lock() {
+                                    *vs = crate::overlay::VisionOverlayState::Hidden;
+                                }
+                            }
                             Err(e) => {
-                                eprintln!("[screamer] Transcription error: {}", e);
-                                if is_vision {
-                                    if let Ok(mut vs) = vision_state.lock() {
-                                        *vs = crate::overlay::VisionOverlayState::Error(
-                                            format!("Transcription failed: {e}"),
-                                        );
-                                    }
+                                eprintln!("[screamer] Vision transcription error: {}", e);
+                                if let Ok(mut vs) = vision_state.lock() {
+                                    *vs = crate::overlay::VisionOverlayState::Error(
+                                        format!("Transcription failed: {e}"),
+                                    );
                                 }
                             }
                         }
 
-                        if sound_effects_enabled.load(Ordering::Relaxed) {
-                            pending_completion_sound.store(true, Ordering::SeqCst);
+                        if sfx.load(Ordering::Relaxed) {
+                            pending_sound.store(true, Ordering::SeqCst);
                         }
                     });
-                }
-            },
-            // ── Screenshot tap (Option while recording) ──
-            {
-                let vision_screenshot = vision_screenshot.clone();
-                move || {
-                    match crate::screenshot::capture_screen() {
-                        Ok(path) => {
-                            eprintln!("[screamer] Screenshot captured: {}", path.display());
-                            if let Ok(mut ss) = vision_screenshot.lock() {
-                                // Clean up any previous screenshot from this session
-                                if let Some(old) = ss.take() {
-                                    let _ = std::fs::remove_file(&old);
-                                }
-                                *ss = Some(path);
-                            }
-                        }
-                        Err(err) => {
-                            eprintln!("[screamer] Screenshot failed: {err}");
-                        }
-                    }
                 }
             },
         );

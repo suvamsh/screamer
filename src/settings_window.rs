@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 const WINDOW_WIDTH: f64 = 660.0;
-const WINDOW_HEIGHT: f64 = 620.0;
+const WINDOW_HEIGHT: f64 = 678.0;
 const OUTER_PADDING: f64 = 24.0;
 const CARD_WIDTH: f64 = WINDOW_WIDTH - OUTER_PADDING * 2.0;
 const CARD_INSET: f64 = 18.0;
@@ -49,6 +49,7 @@ pub struct SettingsWindow {
     row_views: Vec<RowThemeViews>,
     model_popup: Retained<NSPopUpButton>,
     hotkey_popup: Retained<NSPopUpButton>,
+    vision_hotkey_popup: Retained<NSPopUpButton>,
     position_popup: Retained<NSPopUpButton>,
     appearance_toggle: Retained<NSSegmentedControl>,
     live_switch: Retained<NSSwitch>,
@@ -162,6 +163,22 @@ impl SettingsWindow {
             hotkey_popup.addItemWithTitle(&NSString::from_str(hotkey.label));
         }
 
+        let vision_hotkey_popup = popup_button(
+            mtm,
+            CGRect::new(
+                CGPoint::new(
+                    CARD_WIDTH - CARD_INSET - POPUP_WIDTH,
+                    (ROW_HEIGHT - POPUP_HEIGHT) / 2.0,
+                ),
+                CGSize::new(POPUP_WIDTH, POPUP_HEIGHT),
+            ),
+            handler,
+            sel!(selectVisionHotkeyPopup:),
+        );
+        for hotkey in HOTKEYS {
+            vision_hotkey_popup.addItemWithTitle(&NSString::from_str(hotkey.label));
+        }
+
         let position_popup = popup_button(
             mtm,
             CGRect::new(
@@ -254,6 +271,16 @@ impl SettingsWindow {
             mtm,
             &content,
             row_y,
+            "Vision Hotkey",
+            &vision_hotkey_popup,
+            config.appearance,
+        ));
+
+        row_y -= CARD_SPACING + ROW_HEIGHT;
+        row_views.push(add_row(
+            mtm,
+            &content,
+            row_y,
             "Overlay Position",
             &position_popup,
             config.appearance,
@@ -307,6 +334,7 @@ impl SettingsWindow {
             row_views,
             model_popup,
             hotkey_popup,
+            vision_hotkey_popup,
             position_popup,
             appearance_toggle,
             live_switch,
@@ -330,6 +358,13 @@ impl SettingsWindow {
 
         if let Some(index) = HOTKEYS.iter().position(|hotkey| hotkey.id == config.hotkey) {
             self.hotkey_popup.selectItemAtIndex(index as isize);
+        }
+
+        if let Some(index) = HOTKEYS
+            .iter()
+            .position(|hotkey| hotkey.id == config.vision_hotkey)
+        {
+            self.vision_hotkey_popup.selectItemAtIndex(index as isize);
         }
 
         if let Some(index) = POSITIONS

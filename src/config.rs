@@ -88,6 +88,8 @@ pub struct Config {
     pub show_accessibility_helper_on_launch: bool,
     #[serde(default)]
     pub accessibility_helper_dismissed: bool,
+    #[serde(default = "default_vision_hotkey")]
+    pub vision_hotkey: String,
 }
 
 impl Default for Config {
@@ -105,6 +107,7 @@ impl Default for Config {
             summary_ollama_model: default_summary_ollama_model(),
             show_accessibility_helper_on_launch: default_show_accessibility_helper_on_launch(),
             accessibility_helper_dismissed: false,
+            vision_hotkey: default_vision_hotkey(),
         }
     }
 }
@@ -131,6 +134,10 @@ fn default_summary_ollama_model() -> String {
 
 fn default_show_accessibility_helper_on_launch() -> bool {
     true
+}
+
+fn default_vision_hotkey() -> String {
+    "left_option".to_string()
 }
 
 pub struct ModelInfo {
@@ -278,6 +285,17 @@ impl Config {
         self.hotkey_info().label
     }
 
+    pub fn vision_hotkey_info(&self) -> &'static HotkeyInfo {
+        HOTKEYS
+            .iter()
+            .find(|h| h.id == self.vision_hotkey)
+            .unwrap_or(&HOTKEYS[2]) // default to left_option
+    }
+
+    pub fn vision_hotkey_label(&self) -> &'static str {
+        self.vision_hotkey_info().label
+    }
+
     pub fn position_label(&self) -> &'static str {
         POSITIONS
             .iter()
@@ -323,6 +341,10 @@ impl Config {
             self.summary_ollama_model = default.summary_ollama_model;
         }
 
+        if !HOTKEYS.iter().any(|hotkey| hotkey.id == self.vision_hotkey) {
+            self.vision_hotkey = default.vision_hotkey;
+        }
+
         self
     }
 }
@@ -346,6 +368,7 @@ mod tests {
         assert_eq!(config.summary_ollama_model, "gemma4:latest");
         assert!(config.show_accessibility_helper_on_launch);
         assert!(!config.accessibility_helper_dismissed);
+        assert_eq!(config.vision_hotkey, "left_option");
     }
 
     #[test]
@@ -363,6 +386,7 @@ mod tests {
             summary_ollama_model: "gemma4:e2b".to_string(),
             show_accessibility_helper_on_launch: false,
             accessibility_helper_dismissed: true,
+            vision_hotkey: "right_option".to_string(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -378,6 +402,7 @@ mod tests {
         assert_eq!(parsed.summary_ollama_model, "gemma4:e2b");
         assert!(!parsed.show_accessibility_helper_on_launch);
         assert!(parsed.accessibility_helper_dismissed);
+        assert_eq!(parsed.vision_hotkey, "right_option");
     }
 
     #[test]
@@ -395,6 +420,7 @@ mod tests {
         assert_eq!(config.summary_ollama_model, "gemma4:latest");
         assert!(config.show_accessibility_helper_on_launch);
         assert!(!config.accessibility_helper_dismissed);
+        assert_eq!(config.vision_hotkey, "left_option");
     }
 
     #[test]
