@@ -16,6 +16,8 @@ const MAX_SESSION_TITLE_WORDS: usize = 4;
 const MAX_SESSION_TITLE_CHARS: usize = 32;
 const MAX_MODEL_PROMPT_CHARS: usize = 24_000;
 const BUNDLED_SUMMARY_MAX_TOKENS: usize = 512;
+const SCRATCH_PAD_START_MARKER: &str = "--- User Notes (Scratch Pad) ---";
+const SCRATCH_PAD_END_MARKER: &str = "--- End User Notes ---";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SummaryModelOption {
@@ -294,6 +296,47 @@ const GENERAL_CHUNK_CHARS: usize = 5_000;
 const GENERAL_CHUNK_MAX_TOKENS: usize = 384;
 /// Max tokens for the final merge pass (bundled model).
 const GENERAL_MERGE_MAX_TOKENS: usize = 768;
+const GENERAL_TOPIC_DISCOVERY_MAX_TOKENS: usize = 128;
+const GENERAL_TOPIC_DETAIL_MAX_TOKENS: usize = 224;
+const GENERAL_FOCUSED_STAGE_MAX_TOKENS: usize = 160;
+const GENERAL_MAX_TOPICS: usize = 5;
+const GENERAL_TOPIC_CONTEXT_MAX_CHARS: usize = 10_000;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GeneralSummaryContext {
+    scratch_pad: Option<String>,
+    transcript: String,
+    transcript_lines: Vec<String>,
+    chunks: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TopicMention {
+    title: String,
+    chunk_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TopicCluster {
+    title: String,
+    chunk_indices: Vec<usize>,
+    mentions: usize,
+    first_chunk_index: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TopicSection {
+    title: String,
+    bullets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GeneralSummaryDraft {
+    topics: Vec<TopicSection>,
+    decisions: Vec<String>,
+    action_items: Vec<String>,
+    open_questions: Vec<String>,
+}
 
 fn summarize_general_chunked(
     live_notes: &str,
@@ -301,7 +344,14 @@ fn summarize_general_chunked(
     title_hint: Option<&str>,
     fallback: StructuredNotes,
 ) -> Result<StructuredNotes, String> {
-    let transcript = prepared_summary_context(live_notes, segments);
+    let generate = |prompt: &str, max_tokens: usize| generate_bundled_summary(prompt, max_tokens);
+    if let Some(notes) =
+        summarize_general_multistage(live_notes, segments, title_hint, &fallback, &generate)
+    {
+        return Ok(notes);
+    }
+
+    let transcript = full_summary_context(live_notes, segments, false);
     let title = title_hint.unwrap_or("Ambient session");
 
     // Short transcripts: single pass
@@ -358,7 +408,14 @@ fn summarize_general_ollama(
     title_hint: Option<&str>,
     fallback: StructuredNotes,
 ) -> Result<StructuredNotes, String> {
-    let transcript = prepared_summary_context(live_notes, segments);
+    let generate = |prompt: &str, _max_tokens: usize| backend.generate(prompt);
+    if let Some(notes) =
+        summarize_general_multistage(live_notes, segments, title_hint, &fallback, &generate)
+    {
+        return Ok(notes);
+    }
+
+    let transcript = full_summary_context(live_notes, segments, false);
     let title = title_hint.unwrap_or("Ambient session");
 
     if transcript.chars().count() <= GENERAL_SINGLE_PASS_CHARS {
@@ -403,15 +460,536 @@ fn summarize_general_ollama(
     }
 }
 
+fn summarize_general_multistage(
+    live_notes: &str,
+    segments: &[CanonicalSegment],
+    title_hint: Option<&str>,
+    fallback: &StructuredNotes,
+    generate: &dyn Fn(&str, usize) -> Result<String, String>,
+) -> Option<StructuredNotes> {
+    let context = general_summary_context(live_notes, segments);
+    if context.transcript.trim().is_empty() {
+        return None;
+    }
+
+    let topic_clusters = discover_topic_clusters(&context, title_hint, generate);
+    if topic_clusters.is_empty() {
+        return None;
+    }
+
+    let topics = build_topic_sections(&context, title_hint, &topic_clusters, generate);
+    if topics.is_empty() {
+        return None;
+    }
+
+    let decisions = extract_focused_section(
+        &context,
+        title_hint,
+        "Decisions",
+        GENERAL_DECISIONS_PROMPT,
+        &[
+            "decide",
+            "decision",
+            "agreed",
+            "agree",
+            "ship",
+            "release",
+            "go or no-go",
+            "go/no-go",
+            "fallback",
+            "plan",
+        ],
+        fallback.decisions.clone(),
+        generate,
+    );
+    let action_items = extract_focused_section(
+        &context,
+        title_hint,
+        "Action Items",
+        GENERAL_ACTION_ITEMS_PROMPT,
+        &[
+            "action",
+            "next step",
+            "follow up",
+            "follow-up",
+            "todo",
+            "owner",
+            "will ",
+            "pair",
+            "need to",
+            "tomorrow",
+            "friday",
+        ],
+        fallback.action_items.clone(),
+        generate,
+    );
+    let open_questions = extract_focused_section(
+        &context,
+        title_hint,
+        "Open Questions",
+        GENERAL_OPEN_QUESTIONS_PROMPT,
+        &[
+            "?",
+            "question",
+            "unclear",
+            "unknown",
+            "whether",
+            "if ",
+            "blocker",
+            "risk",
+            "concern",
+        ],
+        fallback.open_questions.clone(),
+        generate,
+    );
+
+    let draft = GeneralSummaryDraft {
+        topics,
+        decisions,
+        action_items,
+        open_questions,
+    };
+    let rendered = render_general_summary_draft(&draft);
+    if rendered.trim().is_empty() {
+        return None;
+    }
+
+    Some(StructuredNotes {
+        transcript: segments_to_transcript(segments),
+        raw_notes: Some(rendered),
+        ..Default::default()
+    })
+}
+
 /// Build a `StructuredNotes` that uses `raw_notes` so `to_markdown()` emits
 /// the LLM output directly instead of the rigid section layout.
 fn general_raw_notes(raw: String, segments: &[CanonicalSegment]) -> StructuredNotes {
-    let cleaned = strip_code_fence(&trim_generated_response(&raw));
+    let cleaned = clean_general_markdown(&raw);
     StructuredNotes {
         transcript: segments_to_transcript(segments),
         raw_notes: Some(cleaned),
         ..Default::default()
     }
+}
+
+fn general_summary_context(live_notes: &str, segments: &[CanonicalSegment]) -> GeneralSummaryContext {
+    let (scratch_pad, transcript_body) = split_scratch_pad_context(live_notes);
+    let transcript = if segments.is_empty() {
+        normalize_live_transcript(transcript_body, false)
+    } else {
+        segments_to_speakerless_transcript(segments)
+    };
+    let transcript_lines = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let chunks = split_transcript_chunks(&transcript, GENERAL_CHUNK_CHARS);
+
+    GeneralSummaryContext {
+        scratch_pad: scratch_pad
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string),
+        transcript,
+        transcript_lines,
+        chunks,
+    }
+}
+
+fn discover_topic_clusters(
+    context: &GeneralSummaryContext,
+    title_hint: Option<&str>,
+    generate: &dyn Fn(&str, usize) -> Result<String, String>,
+) -> Vec<TopicCluster> {
+    let mut mentions = Vec::new();
+    for (chunk_index, chunk) in context.chunks.iter().enumerate() {
+        let prompt = build_general_stage_prompt(
+            GENERAL_TOPIC_DISCOVERY_PROMPT,
+            title_hint,
+            context.scratch_pad.as_deref(),
+            "Transcript excerpt",
+            chunk,
+        );
+        let Ok(output) = generate(&prompt, GENERAL_TOPIC_DISCOVERY_MAX_TOKENS) else {
+            continue;
+        };
+
+        for title in parse_topic_titles(&output) {
+            mentions.push(TopicMention { title, chunk_index });
+        }
+    }
+
+    merge_topic_mentions(mentions)
+}
+
+fn build_topic_sections(
+    context: &GeneralSummaryContext,
+    title_hint: Option<&str>,
+    clusters: &[TopicCluster],
+    generate: &dyn Fn(&str, usize) -> Result<String, String>,
+) -> Vec<TopicSection> {
+    let mut sections = Vec::new();
+
+    for cluster in clusters {
+        let topic_context = build_topic_context(context, cluster);
+        if topic_context.trim().is_empty() {
+            continue;
+        }
+
+        let prompt = build_general_stage_prompt(
+            &GENERAL_TOPIC_DETAIL_PROMPT.replace("{topic}", &cluster.title),
+            title_hint,
+            context.scratch_pad.as_deref(),
+            "Relevant transcript passages",
+            &topic_context,
+        );
+        let bullets = generate(&prompt, GENERAL_TOPIC_DETAIL_MAX_TOKENS)
+            .ok()
+            .map(|output| parse_simple_bullets(&output))
+            .filter(|bullets| !bullets.is_empty())
+            .unwrap_or_else(|| fallback_topic_bullets(&topic_context));
+        let bullets = dedupe_bullets(&bullets);
+        if bullets.is_empty() {
+            continue;
+        }
+
+        sections.push(TopicSection {
+            title: cluster.title.clone(),
+            bullets,
+        });
+    }
+
+    sections
+}
+
+fn extract_focused_section(
+    context: &GeneralSummaryContext,
+    title_hint: Option<&str>,
+    section_name: &str,
+    instruction: &str,
+    needles: &[&str],
+    fallback: Vec<String>,
+    generate: &dyn Fn(&str, usize) -> Result<String, String>,
+) -> Vec<String> {
+    let filtered_lines = filtered_context_lines(&context.transcript_lines, needles);
+    let body = if filtered_lines.is_empty() {
+        excerpt_balanced_text(&context.transcript, 6_000)
+    } else {
+        filtered_lines.join("\n")
+    };
+    if body.trim().is_empty() {
+        return dedupe_bullets(&fallback);
+    }
+
+    let prompt = build_general_stage_prompt(
+        instruction,
+        title_hint,
+        context.scratch_pad.as_deref(),
+        "Candidate transcript lines",
+        &body,
+    );
+    let parsed = generate(&prompt, GENERAL_FOCUSED_STAGE_MAX_TOKENS)
+        .ok()
+        .map(|output| parse_simple_bullets(&output))
+        .unwrap_or_default();
+    let cleaned = dedupe_bullets(&parsed);
+    if cleaned.is_empty() {
+        return dedupe_bullets(&fallback)
+            .into_iter()
+            .filter(|line| !is_empty_section_marker(line) && !line.starts_with("No explicit "))
+            .collect();
+    }
+
+    cleaned
+        .into_iter()
+        .filter(|line| !is_empty_section_marker(line))
+        .filter(|line| {
+            !line.eq_ignore_ascii_case(section_name)
+                && !line.to_ascii_lowercase().starts_with("none")
+        })
+        .collect()
+}
+
+fn build_general_stage_prompt(
+    instruction: &str,
+    title_hint: Option<&str>,
+    scratch_pad: Option<&str>,
+    body_label: &str,
+    body: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str(instruction.trim());
+    out.push_str("\n\nTitle hint: ");
+    out.push_str(title_hint.unwrap_or("Ambient session"));
+
+    if let Some(scratch_pad) = scratch_pad.filter(|text| !text.trim().is_empty()) {
+        out.push_str("\n\nUser Notes (Scratch Pad):\n");
+        out.push_str(scratch_pad.trim());
+    }
+
+    out.push_str("\n\n");
+    out.push_str(body_label);
+    out.push_str(":\n");
+    out.push_str(body.trim());
+    out
+}
+
+fn parse_topic_titles(text: &str) -> Vec<String> {
+    parse_simple_bullets(text)
+        .into_iter()
+        .filter_map(|title| normalize_topic_title(&title))
+        .collect()
+}
+
+fn normalize_topic_title(text: &str) -> Option<String> {
+    let line = strip_list_prefix(text);
+    let line = line
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '*' | '-' | ':' | '.'))
+        .trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let line = if let Some((prefix, rest)) = line.split_once(':') {
+        let prefix_lower = prefix.trim().to_ascii_lowercase();
+        if prefix_lower.starts_with("topic") || prefix_lower == "title" {
+            rest.trim()
+        } else {
+            line
+        }
+    } else {
+        line
+    };
+    let line = strip_speaker_prefix(line).trim();
+    let normalized = collapse_spaces(line);
+    let lower = normalized.to_ascii_lowercase();
+    if normalized.split_whitespace().count() > 7 {
+        return None;
+    }
+    if [
+        "summary",
+        "key points",
+        "recap",
+        "discussion",
+        "notes",
+        "transcript",
+        "miscellaneous",
+        "other",
+        "general",
+        "questions",
+        "updates",
+    ]
+    .iter()
+    .any(|generic| lower == *generic || lower.starts_with(&format!("{generic} ")))
+    {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn merge_topic_mentions(mentions: Vec<TopicMention>) -> Vec<TopicCluster> {
+    let mut clusters = Vec::<TopicCluster>::new();
+
+    for mention in mentions {
+        if let Some(existing) = clusters
+            .iter_mut()
+            .find(|cluster| topic_titles_similar(&cluster.title, &mention.title))
+        {
+            existing.mentions += 1;
+            if !existing.chunk_indices.contains(&mention.chunk_index) {
+                existing.chunk_indices.push(mention.chunk_index);
+            }
+            if mention.chunk_index < existing.first_chunk_index {
+                existing.first_chunk_index = mention.chunk_index;
+            }
+            existing.title = preferred_topic_title(&existing.title, &mention.title);
+            continue;
+        }
+
+        clusters.push(TopicCluster {
+            title: mention.title,
+            chunk_indices: vec![mention.chunk_index],
+            mentions: 1,
+            first_chunk_index: mention.chunk_index,
+        });
+    }
+
+    clusters.sort_by(|left, right| {
+        right
+            .mentions
+            .cmp(&left.mentions)
+            .then(left.first_chunk_index.cmp(&right.first_chunk_index))
+    });
+    clusters.truncate(GENERAL_MAX_TOPICS);
+    clusters.sort_by_key(|cluster| cluster.first_chunk_index);
+    clusters
+}
+
+fn topic_titles_similar(left: &str, right: &str) -> bool {
+    let left_normalized = collapse_spaces(&left.to_ascii_lowercase());
+    let right_normalized = collapse_spaces(&right.to_ascii_lowercase());
+    if left_normalized == right_normalized {
+        return true;
+    }
+    if left_normalized.contains(&right_normalized) || right_normalized.contains(&left_normalized) {
+        return true;
+    }
+
+    let left_tokens = summary_tokens(&left_normalized);
+    let right_tokens = summary_tokens(&right_normalized);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return false;
+    }
+
+    let left_set = left_tokens.iter().collect::<HashSet<_>>();
+    let right_set = right_tokens.iter().collect::<HashSet<_>>();
+    let intersection = left_set.intersection(&right_set).count();
+    let min_len = left_set.len().min(right_set.len());
+    min_len > 0 && intersection * 2 >= min_len
+}
+
+fn preferred_topic_title(current: &str, candidate: &str) -> String {
+    let current_words = current.split_whitespace().count();
+    let candidate_words = candidate.split_whitespace().count();
+    if candidate_words > current_words && candidate_words <= 7 {
+        candidate.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
+fn build_topic_context(context: &GeneralSummaryContext, cluster: &TopicCluster) -> String {
+    let mut selected = cluster.chunk_indices.clone();
+    selected.sort_unstable();
+    selected.dedup();
+
+    let combined = selected
+        .into_iter()
+        .filter_map(|index| context.chunks.get(index))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    excerpt_balanced_text(&combined, GENERAL_TOPIC_CONTEXT_MAX_CHARS)
+}
+
+fn fallback_topic_bullets(topic_context: &str) -> Vec<String> {
+    topic_context
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(4)
+        .map(strip_speaker_prefix)
+        .map(collapse_spaces)
+        .collect()
+}
+
+fn filtered_context_lines(lines: &[String], needles: &[&str]) -> Vec<String> {
+    lines.iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            needles.iter().any(|needle| lower.contains(needle))
+        })
+        .cloned()
+        .collect()
+}
+
+fn parse_simple_bullets(text: &str) -> Vec<String> {
+    let cleaned = strip_code_fence(&trim_generated_response(text));
+    let mut bullets = Vec::new();
+
+    for raw_line in cleaned.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let stripped = strip_list_prefix(line).trim();
+        if stripped.is_empty() || stripped == line && is_presentational_line(line) {
+            continue;
+        }
+
+        let normalized = strip_speaker_prefix(stripped).trim();
+        if normalized.is_empty() || is_presentational_line(normalized) {
+            continue;
+        }
+        bullets.push(collapse_spaces(normalized));
+    }
+
+    dedupe_bullets(&bullets)
+}
+
+fn is_presentational_line(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower.starts_with("here are")
+        || lower.starts_with("here's")
+        || lower.starts_with("below are")
+        || lower.starts_with("topics discussed")
+        || lower.starts_with("core discussion points")
+        || lower.starts_with("breakdown")
+        || lower.starts_with("thinking")
+        || lower.starts_with("topic ")
+}
+
+fn dedupe_bullets(lines: &[String]) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    for line in lines {
+        let trimmed = collapse_spaces(strip_speaker_prefix(line).trim());
+        if trimmed.is_empty() || is_empty_section_marker(&trimmed) {
+            continue;
+        }
+        if out.iter().any(|existing| lines_are_similar(existing, &trimmed)) {
+            continue;
+        }
+        out.push(trimmed);
+    }
+    out
+}
+
+fn render_general_summary_draft(draft: &GeneralSummaryDraft) -> String {
+    let mut sections = Vec::new();
+
+    for topic in &draft.topics {
+        if topic.title.trim().is_empty() || topic.bullets.is_empty() {
+            continue;
+        }
+        let bullets = dedupe_bullets(&topic.bullets)
+            .into_iter()
+            .map(|bullet| format!("- {bullet}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if bullets.is_empty() {
+            continue;
+        }
+        sections.push(format!("## {}\n{}", topic.title.trim(), bullets));
+    }
+
+    for (title, items) in [
+        ("Decisions", &draft.decisions),
+        ("Action Items", &draft.action_items),
+        ("Open Questions", &draft.open_questions),
+    ] {
+        let items = dedupe_bullets(items)
+            .into_iter()
+            .filter(|line| !line.starts_with("No explicit "))
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            continue;
+        }
+        let body = items
+            .into_iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("## {title}\n{body}"));
+    }
+
+    sections.join("\n\n").trim().to_string()
 }
 
 /// Split transcript text into roughly equal chunks on line boundaries.
@@ -443,7 +1021,7 @@ fn build_structured_notes_prompt(
     title_hint: Option<&str>,
     template: SummaryTemplate,
 ) -> String {
-    let transcript = prepared_summary_context(live_notes, segments);
+    let transcript = prepared_summary_context(live_notes, segments, true);
     let system_prompt = template_system_prompt(template);
 
     format!(
@@ -504,6 +1082,59 @@ RULES:\n\
 - Use bullet points (- ) under each heading.\n\
 - Keep it concise and well-organized.\n\
 - Output clean markdown only. No preamble.";
+
+const GENERAL_TOPIC_DISCOVERY_PROMPT: &str = "\
+Identify the concrete discussion topics in this meeting transcript excerpt.\n\
+\n\
+RULES:\n\
+- Output topic titles only, one per line, each starting with `- `.\n\
+- Use short, concrete titles named after the actual subject matter.\n\
+- Do not use generic titles like Summary, Key Points, Miscellaneous, Recap, or Updates.\n\
+- Do not include speaker names or labels.\n\
+- Only include topics that are explicitly discussed in the excerpt.\n\
+- Prefer 1 to 4 topic titles.";
+
+const GENERAL_TOPIC_DETAIL_PROMPT: &str = "\
+Write bullets for the meeting topic `{topic}`.\n\
+\n\
+RULES:\n\
+- Output bullet lines only, each starting with `- `.\n\
+- Capture only details relevant to this topic.\n\
+- Preserve concrete facts, names, numbers, dates, and technical terms.\n\
+- Do not mention speaker labels.\n\
+- Do not add a heading or preamble.\n\
+- Do not repeat the topic title inside each bullet.\n\
+- Prefer 2 to 5 bullets.";
+
+const GENERAL_DECISIONS_PROMPT: &str = "\
+Extract only decisions or tentative decisions from these meeting notes.\n\
+\n\
+RULES:\n\
+- Output bullet lines only, each starting with `- `.\n\
+- Include only decisions, commitments, chosen directions, or explicit fallback plans.\n\
+- Do not include general discussion points.\n\
+- Do not mention speaker labels.\n\
+- If there are no reliable decisions, output `- None`.";
+
+const GENERAL_ACTION_ITEMS_PROMPT: &str = "\
+Extract only concrete action items and next steps from these meeting notes.\n\
+\n\
+RULES:\n\
+- Output bullet lines only, each starting with `- `.\n\
+- Include owners, dates, or timing only when they are explicit.\n\
+- Do not include general discussion points.\n\
+- Do not mention speaker labels.\n\
+- If there are no reliable action items, output `- None`.";
+
+const GENERAL_OPEN_QUESTIONS_PROMPT: &str = "\
+Extract only unresolved questions, risks, blockers, or uncertainties from these meeting notes.\n\
+\n\
+RULES:\n\
+- Output bullet lines only, each starting with `- `.\n\
+- Include only items that are still unresolved or require follow-up.\n\
+- Do not include settled decisions.\n\
+- Do not mention speaker labels.\n\
+- If there are no reliable open questions, output `- None`.";
 
 const ONE_ON_ONE_TEMPLATE_PROMPT: &str = "\
 Write concise 1:1 meeting notes in markdown with these sections exactly and in this order:\n\
@@ -593,13 +1224,81 @@ fn build_title_from_summary_prompt(summary_excerpt: &str, fallback: &str) -> Str
     )
 }
 
-fn prepared_summary_context(live_notes: &str, segments: &[CanonicalSegment]) -> String {
-    let source = if segments.is_empty() {
-        live_notes.trim().to_string()
-    } else {
-        segments_to_transcript(segments)
-    };
+fn prepared_summary_context(
+    live_notes: &str,
+    segments: &[CanonicalSegment],
+    include_speaker_labels: bool,
+) -> String {
+    let source = full_summary_context(live_notes, segments, include_speaker_labels);
     excerpt_balanced_text(&source, MAX_MODEL_PROMPT_CHARS)
+}
+
+fn full_summary_context(
+    live_notes: &str,
+    segments: &[CanonicalSegment],
+    include_speaker_labels: bool,
+) -> String {
+    let (scratch_pad, transcript_body) = split_scratch_pad_context(live_notes);
+    let transcript = if segments.is_empty() {
+        normalize_live_transcript(transcript_body, include_speaker_labels)
+    } else if include_speaker_labels {
+        segments_to_transcript(segments)
+    } else {
+        segments_to_speakerless_transcript(segments)
+    };
+
+    let mut sections = Vec::new();
+    if let Some(scratch_pad) = scratch_pad {
+        let scratch_pad = scratch_pad.trim();
+        if !scratch_pad.is_empty() {
+            sections.push(format!("User Notes (Scratch Pad):\n{scratch_pad}"));
+        }
+    }
+
+    let transcript = transcript.trim();
+    if !transcript.is_empty() {
+        sections.push(format!("Transcript:\n{transcript}"));
+    }
+
+    sections.join("\n\n")
+}
+
+fn split_scratch_pad_context(live_notes: &str) -> (Option<&str>, &str) {
+    let trimmed = live_notes.trim();
+    let Some(rest) = trimmed.strip_prefix(SCRATCH_PAD_START_MARKER) else {
+        return (None, trimmed);
+    };
+
+    let rest = rest.trim_start();
+    if let Some((scratch_pad, transcript)) = rest.split_once(SCRATCH_PAD_END_MARKER) {
+        (Some(scratch_pad.trim()), transcript.trim())
+    } else {
+        (Some(rest.trim()), "")
+    }
+}
+
+fn normalize_live_transcript(text: &str, include_speaker_labels: bool) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            if include_speaker_labels {
+                line.to_string()
+            } else {
+                strip_speaker_prefix(line).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn segments_to_speakerless_transcript(segments: &[CanonicalSegment]) -> String {
+    segments
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn excerpt_balanced_text(text: &str, max_chars: usize) -> String {
@@ -850,6 +1549,49 @@ fn strip_code_fence(text: &str) -> String {
         .trim_end_matches("```")
         .trim()
         .to_string()
+}
+
+fn clean_general_markdown(text: &str) -> String {
+    let cleaned = strip_code_fence(&trim_generated_response(text));
+    let mut lines = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if let Some(first_heading) = lines.iter().position(|line| line.starts_with('#')) {
+        lines = lines.split_off(first_heading);
+    }
+
+    let mut normalized = Vec::new();
+    for line in lines {
+        if line == "---" {
+            continue;
+        }
+
+        if line.starts_with('#') {
+            normalized.push(line);
+            continue;
+        }
+
+        let list_stripped = strip_list_prefix(&line);
+        if list_stripped != line {
+            let rest = list_stripped;
+            let rest = strip_speaker_prefix(rest).trim();
+            if !rest.is_empty() {
+                normalized.push(format!("- {rest}"));
+            }
+            continue;
+        }
+
+        let line = strip_speaker_prefix(&line).trim();
+        if !line.is_empty() {
+            normalized.push(line.to_string());
+        }
+    }
+
+    normalized.join("\n").trim().to_string()
 }
 
 fn trim_generated_response(text: &str) -> String {
@@ -1329,7 +2071,27 @@ fn sanitize_session_title(text: &str) -> String {
 }
 
 fn strip_speaker_prefix(text: &str) -> &str {
-    for prefix in ["You:", "S1:", "S2:", "Speaker 1:", "Speaker 2:"] {
+    for prefix in [
+        "You:",
+        "S1:",
+        "S2:",
+        "S3:",
+        "S4:",
+        "S5:",
+        "S6:",
+        "Speaker 1:",
+        "Speaker 2:",
+        "Speaker 3:",
+        "Speaker 4:",
+        "Speaker 5:",
+        "Speaker 6:",
+        "Person A:",
+        "Person B:",
+        "Person C:",
+        "Person D:",
+        "Person E:",
+        "Person F:",
+    ] {
         if let Some(rest) = text.strip_prefix(prefix) {
             return rest.trim();
         }
@@ -1383,10 +2145,12 @@ fn title_case_words(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_structured_notes_prompt, heuristic_structured_notes, parse_model_structured_notes,
-        sanitize_session_title,
+        build_structured_notes_prompt, clean_general_markdown, full_summary_context,
+        heuristic_structured_notes, merge_topic_mentions, parse_model_structured_notes,
+        render_general_summary_draft, sanitize_session_title, summarize_general_multistage,
+        GeneralSummaryDraft, TopicMention, TopicSection,
     };
-    use screamer_core::ambient::{AudioLane, CanonicalSegment, SpeakerLabel};
+    use screamer_core::ambient::{AudioLane, CanonicalSegment, SpeakerLabel, StructuredNotes};
     use screamer_core::ambient::SummaryTemplate;
 
     #[test]
@@ -1512,7 +2276,7 @@ mod tests {
     }
 
     #[test]
-    fn general_template_prompt_uses_note_enhancer_style() {
+    fn general_template_prompt_uses_topic_grouped_markdown_style() {
         let prompt = build_structured_notes_prompt(
             "",
             &[],
@@ -1520,9 +2284,213 @@ mod tests {
             SummaryTemplate::General,
         );
 
-        assert!(prompt.starts_with("You are an expert note enhancer."));
-        assert!(prompt.contains("- Preserve meaning, not wording"));
-        assert!(prompt.contains("- Do not hallucinate or invent information"));
-        assert!(prompt.contains("feel like a smart human listened"));
+        assert!(prompt.starts_with("You are an expert note-taker"));
+        assert!(prompt.contains("Create a markdown heading (##) for each topic"));
+        assert!(prompt.contains("Do NOT reproduce speaker labels"));
+        assert!(prompt.contains("Transcript:"));
+    }
+
+    #[test]
+    fn structured_prompt_preserves_scratch_pad_context() {
+        let prompt = build_structured_notes_prompt(
+            "--- User Notes (Scratch Pad) ---\nPrioritize launch risk and customer issues.\n--- End User Notes ---\n\nPerson A: Launch next week if QA passes.",
+            &[],
+            Some("Launch review"),
+            SummaryTemplate::TeamMeeting,
+        );
+
+        assert!(prompt.contains("User Notes (Scratch Pad):"));
+        assert!(prompt.contains("Prioritize launch risk and customer issues."));
+        assert!(prompt.contains("Transcript:"));
+    }
+
+    #[test]
+    fn general_context_uses_speakerless_segments() {
+        let segments = vec![
+            CanonicalSegment {
+                id: 1,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S1,
+                start_ms: 0,
+                end_ms: 500,
+                text: "Ship the calendar invite flow next week.".to_string(),
+            },
+            CanonicalSegment {
+                id: 2,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S2,
+                start_ms: 500,
+                end_ms: 1_000,
+                text: "Recurring mobile bug is the blocker.".to_string(),
+            },
+        ];
+
+        let context = full_summary_context(
+            "--- User Notes (Scratch Pad) ---\nFocus on launch blockers.\n--- End User Notes ---\n\nPerson A: ignored because segments win.",
+            &segments,
+            false,
+        );
+
+        assert!(context.contains("User Notes (Scratch Pad):\nFocus on launch blockers."));
+        assert!(context.contains("Ship the calendar invite flow next week."));
+        assert!(context.contains("Recurring mobile bug is the blocker."));
+        assert!(!context.contains("Person A:"));
+        assert!(!context.contains("Person B:"));
+    }
+
+    #[test]
+    fn clean_general_markdown_strips_speaker_labels_and_preamble() {
+        let cleaned = clean_general_markdown(
+            "Here’s a breakdown of the core discussion points:\n\n## Calendar Invite Flow\n* Person A: Ship next week if QA passes.\n* Person B: Maya will pair on the blocker.\n\n---",
+        );
+
+        assert_eq!(
+            cleaned,
+            "## Calendar Invite Flow\n- Ship next week if QA passes.\n- Maya will pair on the blocker."
+        );
+    }
+
+    #[test]
+    fn merge_topic_mentions_collapses_near_duplicate_titles() {
+        let clusters = merge_topic_mentions(vec![
+            TopicMention {
+                title: "Launch timeline".to_string(),
+                chunk_index: 0,
+            },
+            TopicMention {
+                title: "Launch plan".to_string(),
+                chunk_index: 1,
+            },
+            TopicMention {
+                title: "Customer confusion".to_string(),
+                chunk_index: 1,
+            },
+        ]);
+
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0].chunk_indices, vec![0, 1]);
+        assert!(clusters[0].title.contains("Launch"));
+        assert_eq!(clusters[1].title, "Customer confusion");
+    }
+
+    #[test]
+    fn render_general_summary_draft_outputs_topics_then_operational_sections() {
+        let markdown = render_general_summary_draft(&GeneralSummaryDraft {
+            topics: vec![
+                TopicSection {
+                    title: "Release timing".to_string(),
+                    bullets: vec!["Ship next week if QA passes by Thursday.".to_string()],
+                },
+                TopicSection {
+                    title: "Customer confusion".to_string(),
+                    bullets: vec!["Support flagged time zones and duplicate reminders.".to_string()],
+                },
+            ],
+            decisions: vec!["Release desktop editing first if the mobile bug slips.".to_string()],
+            action_items: vec!["Pair with Maya on the recurring bug tomorrow.".to_string()],
+            open_questions: vec!["Whether the recurring bug will be fixed before Thursday.".to_string()],
+        });
+
+        assert!(markdown.starts_with("## Release timing"));
+        assert!(markdown.contains("## Customer confusion"));
+        assert!(markdown.contains("## Decisions"));
+        assert!(markdown.contains("## Action Items"));
+        assert!(markdown.contains("## Open Questions"));
+    }
+
+    #[test]
+    fn multistage_general_summary_builds_topic_grouped_notes() {
+        let segments = vec![
+            CanonicalSegment {
+                id: 1,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S1,
+                start_ms: 0,
+                end_ms: 500,
+                text: "We should ship the calendar invite flow next week if QA passes by Thursday."
+                    .to_string(),
+            },
+            CanonicalSegment {
+                id: 2,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S2,
+                start_ms: 500,
+                end_ms: 1_000,
+                text: "The blocker is the recurring-event bug in mobile.".to_string(),
+            },
+            CanonicalSegment {
+                id: 3,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S1,
+                start_ms: 1_000,
+                end_ms: 1_500,
+                text: "If that slips, release desktop editing first.".to_string(),
+            },
+            CanonicalSegment {
+                id: 4,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S3,
+                start_ms: 1_500,
+                end_ms: 2_000,
+                text: "Support flagged confusion around time zones and duplicate reminders."
+                    .to_string(),
+            },
+            CanonicalSegment {
+                id: 5,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S2,
+                start_ms: 2_000,
+                end_ms: 2_500,
+                text: "Action item is to pair with Maya on the recurring bug tomorrow."
+                    .to_string(),
+            },
+            CanonicalSegment {
+                id: 6,
+                lane: AudioLane::Microphone,
+                speaker: SpeakerLabel::S1,
+                start_ms: 2_500,
+                end_ms: 3_000,
+                text: "We will decide go or no-go in Friday's launch review.".to_string(),
+            },
+        ];
+        let generator = |prompt: &str, _max_tokens: usize| -> Result<String, String> {
+            if prompt.contains("Identify the concrete discussion topics") {
+                return Ok("- Release timing\n- Customer confusion".to_string());
+            }
+            if prompt.contains("Write bullets for the meeting topic `Release timing`") {
+                return Ok("- Ship the calendar invite flow next week if QA passes by Thursday.\n- If the recurring mobile bug slips, release desktop editing first.\n- The final go or no-go call happens in Friday's launch review.".to_string());
+            }
+            if prompt.contains("Write bullets for the meeting topic `Customer confusion`") {
+                return Ok("- Support flagged confusion around time zones and duplicate reminders.".to_string());
+            }
+            if prompt.contains("Extract only decisions") {
+                return Ok("- Ship the calendar invite flow next week if QA passes by Thursday.\n- Release desktop editing first if the recurring mobile bug slips.\n- Make the go or no-go call in Friday's launch review.".to_string());
+            }
+            if prompt.contains("Extract only concrete action items") {
+                return Ok("- Pair with Maya on the recurring bug tomorrow.".to_string());
+            }
+            if prompt.contains("Extract only unresolved questions") {
+                return Ok("- Whether the recurring mobile bug will be fixed before Thursday QA.".to_string());
+            }
+            Err(format!("unexpected prompt: {prompt}"))
+        };
+
+        let notes = summarize_general_multistage(
+            "",
+            &segments,
+            Some("Launch review"),
+            &StructuredNotes::default(),
+            &generator,
+        )
+        .expect("multistage summary should succeed");
+        let markdown = notes.raw_notes.expect("raw notes should be present");
+
+        assert!(markdown.contains("## Release timing"));
+        assert!(markdown.contains("## Customer confusion"));
+        assert!(markdown.contains("## Decisions"));
+        assert!(markdown.contains("## Action Items"));
+        assert!(markdown.contains("## Open Questions"));
+        assert!(!markdown.contains("Person A"));
+        assert!(!markdown.contains("Person B"));
     }
 }

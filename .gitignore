@@ -8,6 +8,22 @@ dist/
 # Models (large binary files — download with ./download_model.sh)
 models/
 
+# Local development helpers and ambient eval baselines
+.env.screamer.local
+.screamer-benchmarks/
+/.venv/
+/.venv*/
+/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Python packaging / local envs
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
 # macOS
 .DS_Store
 

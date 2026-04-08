@@ -1,5 +1,7 @@
 use crate::ambient_controller::AmbientController;
-use crate::config::{AppAppearance, Config, SummaryBackendPreference, HOTKEYS, MODELS, POSITIONS};
+use crate::config::{
+    AppAppearance, Config, SummaryBackendPreference, HOTKEYS, MODELS, POSITIONS,
+};
 use crate::diarization::default_diarization_engine;
 use crate::logging;
 use crate::main_window::MainWindow;
@@ -345,6 +347,11 @@ fn menu_handler_class() -> &'static AnyClass {
                     as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
             builder.add_method(
+                sel!(selectAmbientFinalBackendPopup:),
+                select_ambient_final_backend_popup_action
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
                 sel!(startAmbientSession:),
                 start_ambient_session_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
@@ -549,6 +556,15 @@ extern "C" fn select_summary_model_popup_action(
 ) {
     let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
     apply_summary_model_selection(index as usize);
+}
+
+extern "C" fn select_ambient_final_backend_popup_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    sender: *mut AnyObject,
+) {
+    let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+    apply_ambient_final_backend_selection(index as usize);
 }
 
 extern "C" fn start_ambient_session_action(
@@ -827,6 +843,33 @@ fn set_ambient_system_audio_enabled(enabled: bool) {
     config.ambient_system_audio = enabled;
     config.save();
     sync_settings_window(&config);
+}
+
+fn apply_ambient_final_backend_selection(index: usize) {
+    let backend = MAIN_WINDOW.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|window| window.ambient_final_backend_for_index(index))
+    });
+    let Some(backend) = backend else {
+        sync_settings_window(&Config::load());
+        return;
+    };
+
+    let mut config = Config::load();
+    if config.ambient_final_backend == backend {
+        sync_settings_window(&config);
+        return;
+    }
+
+    config.ambient_final_backend = backend;
+    config.save();
+    sync_settings_window(&config);
+
+    eprintln!(
+        "[screamer] Ambient final backend set to {}",
+        config.ambient_final_backend_label()
+    );
 }
 
 fn apply_summary_model_selection(index: usize) {

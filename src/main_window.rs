@@ -1,6 +1,9 @@
 use crate::ambient_controller::AmbientController;
 use crate::branding;
-use crate::config::{AppAppearance, Config, HOTKEYS, MODELS, POSITIONS};
+use crate::config::{
+    AmbientFinalBackendPreference, AppAppearance, Config, AMBIENT_FINAL_BACKENDS, HOTKEYS,
+    MODELS, POSITIONS,
+};
 use crate::session_store::{SessionStore, SessionSummary};
 use crate::summary_backend::{SummaryBackendRegistry, SummaryModelOption};
 use crate::theme;
@@ -74,6 +77,7 @@ pub struct MainWindow {
     settings_sound_switch: Retained<NSSwitch>,
     settings_ambient_mic_switch: Retained<NSSwitch>,
     settings_ambient_system_switch: Retained<NSSwitch>,
+    settings_ambient_final_popup: Retained<NSPopUpButton>,
     settings_summary_popup: Retained<NSPopUpButton>,
     route: Cell<i32>,
     current_session_id: Cell<i64>,
@@ -727,6 +731,33 @@ impl MainWindow {
         );
         settings_view.addSubview(&settings_subtitle);
 
+        let settings_ambient_final_label = text_label(
+            mtm,
+            "Ambient final pass",
+            CGRect::new(
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 188.0),
+                CGSize::new(220.0, 18.0),
+            ),
+            12.5,
+            &theme::secondary_text(config.appearance),
+            true,
+        );
+        settings_view.addSubview(&settings_ambient_final_label);
+
+        let settings_ambient_final_popup = popup_button(
+            mtm,
+            CGRect::new(
+                CGPoint::new(CONTENT_PADDING + 468.0, WINDOW_HEIGHT - 198.0),
+                CGSize::new(260.0, 30.0),
+            ),
+            handler,
+            sel!(selectAmbientFinalBackendPopup:),
+        );
+        for backend in AMBIENT_FINAL_BACKENDS {
+            settings_ambient_final_popup.addItemWithTitle(&NSString::from_str(backend.label));
+        }
+        settings_view.addSubview(&settings_ambient_final_popup);
+
         let settings_summary_popup = popup_button(
             mtm,
             CGRect::new(CGPoint::new(468.0, 11.0), CGSize::new(260.0, 32.0)),
@@ -914,20 +945,6 @@ impl MainWindow {
             &permission_shortcuts,
         );
 
-        let settings_note = text_label(
-            mtm,
-            "Recent sessions use short local Gemma titles when a compatible Ollama model is available.",
-            CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 174.0),
-                CGSize::new(SETTINGS_COLUMN_WIDTH, 18.0),
-            ),
-            12.0,
-            &theme::secondary_text(config.appearance),
-            false,
-        );
-        settings_note.setMaximumNumberOfLines(1);
-        settings_view.addSubview(&settings_note);
-
         let window = Rc::new(Self {
             handler,
             window,
@@ -969,6 +986,7 @@ impl MainWindow {
             settings_sound_switch,
             settings_ambient_mic_switch,
             settings_ambient_system_switch,
+            settings_ambient_final_popup,
             settings_summary_popup,
             route: Cell::new(ROUTE_HOME),
             current_session_id: Cell::new(0),
@@ -1070,6 +1088,13 @@ impl MainWindow {
             } else {
                 NSControlStateValueOff
             });
+        if let Some(index) = AMBIENT_FINAL_BACKENDS
+            .iter()
+            .position(|backend| backend.id == config.ambient_final_backend)
+        {
+            self.settings_ambient_final_popup
+                .selectItemAtIndex(index as isize);
+        }
         self.sync_summary_popup(config);
     }
 
@@ -1096,6 +1121,13 @@ impl MainWindow {
 
     pub fn summary_option_for_index(&self, index: usize) -> Option<SummaryModelOption> {
         self.summary_options.borrow().get(index).cloned()
+    }
+
+    pub fn ambient_final_backend_for_index(
+        &self,
+        index: usize,
+    ) -> Option<AmbientFinalBackendPreference> {
+        AMBIENT_FINAL_BACKENDS.get(index).map(|backend| backend.id)
     }
 
     pub fn set_summary_template(&self, index: usize) {

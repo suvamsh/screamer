@@ -205,8 +205,9 @@ pub struct StructuredNotes {
     pub action_items: Vec<String>,
     pub open_questions: Vec<String>,
     pub transcript: String,
-    /// Free-form markdown produced by the General template.  When present,
-    /// `to_markdown()` emits this directly instead of the fixed sections.
+    /// Free-form markdown produced by the General template. When present,
+    /// `to_markdown()` emits this directly. Transcript content is stored and
+    /// rendered separately by the app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_notes: Option<String>,
 }
@@ -214,12 +215,7 @@ pub struct StructuredNotes {
 impl StructuredNotes {
     pub fn to_markdown(&self) -> String {
         if let Some(raw) = &self.raw_notes {
-            let mut out = raw.trim().to_string();
-            if !self.transcript.is_empty() {
-                out.push_str("\n\n## Transcript\n\n");
-                out.push_str(&self.transcript);
-            }
-            return out;
+            return raw.trim().to_string();
         }
         let mut out = String::new();
         push_section(&mut out, "Summary", &[self.summary.clone()]);
@@ -227,7 +223,6 @@ impl StructuredNotes {
         push_section(&mut out, "Decisions", &self.decisions);
         push_section(&mut out, "Action Items", &self.action_items);
         push_section(&mut out, "Open Questions", &self.open_questions);
-        push_section(&mut out, "Transcript", &[self.transcript.clone()]);
         out.trim().to_string()
     }
 }
@@ -486,5 +481,19 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].text, "hello");
         assert_eq!(segments[1].text, "world");
+    }
+
+    #[test]
+    fn raw_notes_markdown_omits_transcript_section() {
+        let notes = StructuredNotes {
+            raw_notes: Some("## Shipping\n- Calendar invite flow is ready.".to_string()),
+            transcript: "Person A: calendar invite flow".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            notes.to_markdown(),
+            "## Shipping\n- Calendar invite flow is ready."
+        );
     }
 }

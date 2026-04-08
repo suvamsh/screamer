@@ -14,9 +14,14 @@ publish = false
 members = [
     ".",
     "crates/screamer-core",
+    "crates/screamer-diarization",
     "crates/screamer-models",
     "crates/screamer-whisper",
 ]
+
+[features]
+default = []
+ambient-ort-coreml = ["screamer-diarization/ort-coreml"]
 
 [dependencies]
 cpal = "0.15"
@@ -86,6 +91,7 @@ core-graphics = "0.24"
 core-foundation = "0.10"
 arboard = "3"
 screamer-core = { path = "crates/screamer-core" }
+screamer-diarization = { path = "crates/screamer-diarization" }
 screamer-models = { path = "crates/screamer-models" }
 screamer-whisper = { path = "crates/screamer-whisper" }
 serde = { version = "1", features = ["derive"] }
@@ -96,6 +102,7 @@ log = "0.4"
 oslog = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 llama_cpp_2 = { package = "llama-cpp-2", version = "0.1.141", default-features = false, features = ["metal", "mtmd"] }
+hound = "3"
 
 [build-dependencies]
 cc = "1"

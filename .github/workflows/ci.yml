@@ -61,18 +61,23 @@ jobs:
       - name: Install system dependencies
         run: brew install cmake
 
-      - name: Build universal macOS binary
+      - name: Build universal macOS binaries
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin -p screamer
-          cargo build --locked --release --target x86_64-apple-darwin -p screamer
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
           mkdir -p target/universal/release
-          lipo -create \
-            target/aarch64-apple-darwin/release/screamer \
-            target/x86_64-apple-darwin/release/screamer \
-            -output target/universal/release/screamer
-          lipo -info target/universal/release/screamer
+          for bin in screamer screamer_summary_helper screamer_vision_helper; do
+            arm="target/aarch64-apple-darwin/release/$bin"
+            x86="target/x86_64-apple-darwin/release/$bin"
+            if [ -f "$arm" ] && [ -f "$x86" ]; then
+              lipo -create "$arm" "$x86" -output "target/universal/release/$bin"
+              lipo -info "target/universal/release/$bin"
+            fi
+          done
 
       - name: Smoke test macOS app bundle
         env:
           BIN_PATH: target/universal/release/screamer
+          SUMMARY_HELPER_PATH: target/universal/release/screamer_summary_helper
+          VISION_HELPER_PATH: target/universal/release/screamer_vision_helper
         run: ./scripts/macos_bundle_smoke.sh

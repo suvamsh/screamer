@@ -1,0 +1,27 @@
+[package]
+name = "screamer-diarization"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "screamer_diarization"
+path = "src/lib.rs"
+
+[features]
+default = []
+ort-coreml = ["dep:ort"]
+
+[dependencies]
+dirs = "6"
+hex = "0.4"
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "coreml", "download-binaries", "copy-dylibs", "tls-native"] }
+screamer-core = { path = "../screamer-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

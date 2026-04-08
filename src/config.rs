@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize, Serializer};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,6 +27,48 @@ pub enum SummaryBackendPreference {
     #[default]
     Bundled,
     Ollama,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AmbientFinalBackendPreference {
+    #[default]
+    Native,
+    NativeDiarization,
+}
+
+impl AmbientFinalBackendPreference {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::NativeDiarization => "native_diarization",
+        }
+    }
+}
+
+impl Serialize for AmbientFinalBackendPreference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AmbientFinalBackendPreference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "native" => Ok(Self::Native),
+            "native_diarization" | "whisperx_hybrid" => Ok(Self::NativeDiarization),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["native", "native_diarization", "whisperx_hybrid"],
+            )),
+        }
+    }
 }
 
 pub struct PositionInfo {
@@ -64,6 +107,22 @@ pub const APPEARANCES: &[AppearanceInfo] = &[
     },
 ];
 
+pub struct AmbientFinalBackendInfo {
+    pub id: AmbientFinalBackendPreference,
+    pub label: &'static str,
+}
+
+pub const AMBIENT_FINAL_BACKENDS: &[AmbientFinalBackendInfo] = &[
+    AmbientFinalBackendInfo {
+        id: AmbientFinalBackendPreference::Native,
+        label: "Native",
+    },
+    AmbientFinalBackendInfo {
+        id: AmbientFinalBackendPreference::NativeDiarization,
+        label: "Native Diarization",
+    },
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub model: String,
@@ -80,6 +139,8 @@ pub struct Config {
     pub ambient_microphone: bool,
     #[serde(default = "default_ambient_system_audio")]
     pub ambient_system_audio: bool,
+    #[serde(default)]
+    pub ambient_final_backend: AmbientFinalBackendPreference,
     #[serde(default)]
     pub summary_backend: SummaryBackendPreference,
     #[serde(default = "default_summary_ollama_model")]
@@ -103,6 +164,7 @@ impl Default for Config {
             sound_effects: default_sound_effects(),
             ambient_microphone: default_ambient_microphone(),
             ambient_system_audio: default_ambient_system_audio(),
+            ambient_final_backend: AmbientFinalBackendPreference::default(),
             summary_backend: SummaryBackendPreference::default(),
             summary_ollama_model: default_summary_ollama_model(),
             show_accessibility_helper_on_launch: default_show_accessibility_helper_on_launch(),
@@ -319,6 +381,14 @@ impl Config {
         }
     }
 
+    pub fn ambient_final_backend_label(&self) -> &'static str {
+        AMBIENT_FINAL_BACKENDS
+            .iter()
+            .find(|backend| backend.id == self.ambient_final_backend)
+            .map(|backend| backend.label)
+            .unwrap_or("Native")
+    }
+
     fn normalized(mut self) -> Self {
         let default = Self::default();
 
@@ -364,6 +434,7 @@ mod tests {
         assert!(config.sound_effects);
         assert!(config.ambient_microphone);
         assert!(config.ambient_system_audio);
+        assert_eq!(config.ambient_final_backend, AmbientFinalBackendPreference::Native);
         assert_eq!(config.summary_backend, SummaryBackendPreference::Bundled);
         assert_eq!(config.summary_ollama_model, "gemma4:latest");
         assert!(config.show_accessibility_helper_on_launch);
@@ -382,6 +453,7 @@ mod tests {
             sound_effects: false,
             ambient_microphone: false,
             ambient_system_audio: false,
+            ambient_final_backend: AmbientFinalBackendPreference::NativeDiarization,
             summary_backend: SummaryBackendPreference::Ollama,
             summary_ollama_model: "gemma4:e2b".to_string(),
             show_accessibility_helper_on_launch: false,
@@ -398,6 +470,10 @@ mod tests {
         assert!(!parsed.sound_effects);
         assert!(!parsed.ambient_microphone);
         assert!(!parsed.ambient_system_audio);
+        assert_eq!(
+            parsed.ambient_final_backend,
+            AmbientFinalBackendPreference::NativeDiarization
+        );
         assert_eq!(parsed.summary_backend, SummaryBackendPreference::Ollama);
         assert_eq!(parsed.summary_ollama_model, "gemma4:e2b");
         assert!(!parsed.show_accessibility_helper_on_launch);
@@ -416,11 +492,24 @@ mod tests {
         assert!(config.sound_effects);
         assert!(config.ambient_microphone);
         assert!(config.ambient_system_audio);
+        assert_eq!(config.ambient_final_backend, AmbientFinalBackendPreference::Native);
         assert_eq!(config.summary_backend, SummaryBackendPreference::Bundled);
         assert_eq!(config.summary_ollama_model, "gemma4:latest");
         assert!(config.show_accessibility_helper_on_launch);
         assert!(!config.accessibility_helper_dismissed);
         assert_eq!(config.vision_hotkey, "left_option");
+    }
+
+    #[test]
+    fn config_accepts_legacy_whisperx_backend_alias() {
+        let config: Config = serde_json::from_str(
+            r#"{"model":"base","hotkey":"left_control","ambient_final_backend":"whisperx_hybrid"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.ambient_final_backend,
+            AmbientFinalBackendPreference::NativeDiarization
+        );
     }
 
     #[test]

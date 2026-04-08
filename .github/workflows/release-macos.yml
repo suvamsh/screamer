@@ -96,21 +96,26 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
-      - name: Build universal binary
+      - name: Build universal binaries
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin -p screamer
-          cargo build --locked --release --target x86_64-apple-darwin -p screamer
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
           mkdir -p target/universal/release
-          lipo -create \
-            target/aarch64-apple-darwin/release/screamer \
-            target/x86_64-apple-darwin/release/screamer \
-            -output target/universal/release/screamer
-          lipo -info target/universal/release/screamer
+          for bin in screamer screamer_summary_helper screamer_vision_helper; do
+            arm="target/aarch64-apple-darwin/release/$bin"
+            x86="target/x86_64-apple-darwin/release/$bin"
+            if [ -f "$arm" ] && [ -f "$x86" ]; then
+              lipo -create "$arm" "$x86" -output "target/universal/release/$bin"
+              lipo -info "target/universal/release/$bin"
+            fi
+          done
 
       - name: Bundle signed app
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
           BIN_PATH: target/universal/release/screamer
+          SUMMARY_HELPER_PATH: target/universal/release/screamer_summary_helper
+          VISION_HELPER_PATH: target/universal/release/screamer_vision_helper
           SKIP_BUILD: "1"
           CODESIGN_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         run: ./bundle.sh

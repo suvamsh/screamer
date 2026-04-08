@@ -1,21 +1,18 @@
-use crate::config::Config;
+use crate::ambient_final_pass::{run_native_diarization_final_pass, AmbientFinalPassResult};
+use crate::ambient_pipeline::{self, ProcessState};
+use crate::config::{AmbientFinalBackendPreference, Config};
 use crate::recorder::Recorder;
 use crate::session_store::{SessionDetail, SessionStore};
 use crate::summary_backend::SummaryBackendRegistry;
 use screamer_core::ambient::{
-    chunk_len_samples, chunk_step_samples, merge_segment, AmbientSessionConfig,
-    AmbientSessionState, AudioLane, CanonicalSegment, DiarizationEngine, DiarizationRequest,
-    DiarizedSegment, SummaryTemplate, TranscriptSegment,
+    AmbientSessionConfig, AmbientSessionState, CanonicalSegment, DiarizationEngine,
+    SummaryTemplate,
 };
-use screamer_core::audio::TARGET_SAMPLE_RATE;
-use screamer_core::session::{prepare_final_transcription, FinalTranscriptionAction};
 use screamer_whisper::Transcriber;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const MIN_CHUNK_PROCESS_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 2;
 
 #[derive(Clone, Debug)]
 pub struct AmbientSessionSnapshot {
@@ -52,11 +49,6 @@ struct RuntimeSession {
     stop_signal: Arc<AtomicBool>,
     snapshot: Arc<Mutex<AmbientSessionSnapshot>>,
     worker: Option<JoinHandle<()>>,
-}
-
-struct ProcessState {
-    processed_until: usize,
-    next_segment_id: u64,
 }
 
 impl AmbientController {
@@ -394,10 +386,8 @@ fn spawn_runtime_worker(
             None
         };
 
-        let mut process_state = ProcessState {
-            processed_until: 0,
-            next_segment_id: 1,
-        };
+        let mut process_state = ProcessState::default();
+        let mut final_samples = Vec::new();
 
         while !stop_signal.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(1_200));
@@ -417,7 +407,7 @@ fn spawn_runtime_worker(
         }
 
         if let Some(recorder) = &recorder {
-            let final_samples = recorder.stop();
+            final_samples = recorder.stop();
             let _ = process_audio_snapshot(
                 session_id,
                 &ambient_config,
@@ -430,7 +420,7 @@ fn spawn_runtime_worker(
             );
         }
 
-        let (live_notes, segments, scratch_pad, summary_template) = {
+        let (mut live_notes, mut segments, scratch_pad, summary_template, mut warning) = {
             let state = snapshot
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -439,8 +429,55 @@ fn spawn_runtime_worker(
                 state.segments.clone(),
                 state.scratch_pad.clone(),
                 state.summary_template,
+                state.warning.clone(),
             )
         };
+
+        if matches!(
+            app_config.ambient_final_backend,
+            AmbientFinalBackendPreference::NativeDiarization
+        ) && !final_samples.is_empty()
+        {
+            match run_native_ambient_final_pass(&transcriber, &final_samples) {
+                Ok(final_pass) => {
+                    eprintln!(
+                        "[screamer] Ambient final pass={} total={}ms speakers={} chars={}",
+                        final_pass.engine,
+                        final_pass.diagnostics.total_ms,
+                        final_pass.diagnostics.detected_speakers,
+                        final_pass.transcript_text.chars().count()
+                    );
+                    segments = final_pass.segments;
+                    live_notes = screamer_core::ambient::segments_to_transcript(&segments);
+                    let _ = store.replace_segments(session_id, &segments);
+                    let _ = store.update_live_notes(session_id, &live_notes);
+                    if let Some(diagnostic_warning) = final_pass.diagnostics.warning.as_deref() {
+                        warning = Some(append_warning(warning.as_deref(), diagnostic_warning));
+                    }
+                    if let Ok(mut state) = snapshot.lock() {
+                        state.live_notes = live_notes.clone();
+                        state.segments = segments.clone();
+                        state.transcript_markdown = live_notes.clone();
+                        state.warning = warning.clone();
+                    }
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[screamer] Native diarization final pass failed; falling back to native transcript: {err}"
+                    );
+                    warning = Some(append_warning(
+                        warning.as_deref(),
+                        &format!(
+                            "Native diarization final pass failed; using native transcript. {err}"
+                        ),
+                    ));
+                    if let Ok(mut state) = snapshot.lock() {
+                        state.warning = warning.clone();
+                    }
+                }
+            }
+        }
+
         let summarizer = summary_registry.summarizer_for_config(&app_config);
         // Use a heuristic title hint for the summarizer prompt
         let title_hint =
@@ -496,6 +533,7 @@ fn spawn_runtime_worker(
             state.state = final_state;
             state.structured_notes = structured_notes;
             state.transcript_markdown = transcript_markdown;
+            state.warning = warning;
             state.ended_at_ms = Some(ended_at);
             state.elapsed_ms = state
                 .ended_at_ms
@@ -515,18 +553,6 @@ fn process_audio_snapshot(
     samples: &[f32],
     process_state: &mut ProcessState,
 ) -> Result<(), String> {
-    if samples.len().saturating_sub(process_state.processed_until) < MIN_CHUNK_PROCESS_SAMPLES {
-        return Ok(());
-    }
-
-    let chunk_len = chunk_len_samples(ambient_config.chunk_seconds, TARGET_SAMPLE_RATE as usize);
-    let step = chunk_step_samples(
-        ambient_config.chunk_seconds,
-        ambient_config.overlap_seconds,
-        TARGET_SAMPLE_RATE as usize,
-    )
-    .max(MIN_CHUNK_PROCESS_SAMPLES);
-
     let existing_segments = {
         let state = snapshot
             .lock()
@@ -534,48 +560,14 @@ fn process_audio_snapshot(
         state.segments.clone()
     };
     let mut merged_segments = existing_segments.clone();
-    let mut did_change = false;
-
-    while samples.len().saturating_sub(process_state.processed_until) >= MIN_CHUNK_PROCESS_SAMPLES {
-        let end = (process_state.processed_until + step).min(samples.len());
-        let start = end.saturating_sub(chunk_len);
-        let window = &samples[start..end];
-
-        match prepare_final_transcription(window) {
-            FinalTranscriptionAction::Ready(window_bounds) => {
-                let transcribe_range = window_bounds.range;
-                let chunk = &window[transcribe_range.clone()];
-                let detailed = transcriber.transcribe_detailed_profiled(chunk)?;
-                let chunk_start_ms = samples_to_ms(start + transcribe_range.start);
-                let chunk_end_ms = samples_to_ms(start + transcribe_range.end);
-                let transcript_segments =
-                    transcript_segments_from_decode(AudioLane::Microphone, chunk, &detailed);
-                if !transcript_segments.is_empty() {
-                    let diarized = diarization_engine.diarize(DiarizationRequest {
-                        lane: AudioLane::Microphone,
-                        sample_rate_hz: TARGET_SAMPLE_RATE as usize,
-                        chunk_start_ms,
-                        chunk_end_ms,
-                        samples: chunk,
-                        transcript_segments: &transcript_segments,
-                        previous_segments: &merged_segments,
-                    });
-                    did_change |= integrate_diarized_segments(
-                        &mut merged_segments,
-                        &diarized,
-                        &mut process_state.next_segment_id,
-                    );
-                }
-            }
-            FinalTranscriptionAction::SkipSilence
-            | FinalTranscriptionAction::SkipTooShort { .. } => {}
-        }
-
-        process_state.processed_until = end;
-        if end == samples.len() {
-            break;
-        }
-    }
+    let did_change = ambient_pipeline::process_audio_snapshot(
+        ambient_config,
+        transcriber,
+        diarization_engine,
+        samples,
+        process_state,
+        &mut merged_segments,
+    )?;
 
     if !did_change {
         return Ok(());
@@ -601,68 +593,6 @@ fn process_audio_snapshot(
 
     store.update_live_notes(session_id, &live_notes)?;
     Ok(())
-}
-
-fn transcript_segments_from_decode(
-    lane: AudioLane,
-    samples: &[f32],
-    detailed: &screamer_whisper::DetailedTranscriptionOutput,
-) -> Vec<TranscriptSegment> {
-    let mut segments = detailed
-        .segments
-        .iter()
-        .map(|segment| TranscriptSegment {
-            lane,
-            start_ms: segment.start_ms,
-            end_ms: segment.end_ms,
-            speaker_turn_next: segment.speaker_turn_next,
-            text: segment.text.clone(),
-        })
-        .collect::<Vec<_>>();
-
-    if segments.is_empty() && !detailed.text.trim().is_empty() {
-        segments.push(TranscriptSegment {
-            lane,
-            start_ms: 0,
-            end_ms: samples_to_ms(samples.len()).max(1),
-            speaker_turn_next: false,
-            text: detailed.text.trim().to_string(),
-        });
-    }
-
-    segments
-}
-
-fn integrate_diarized_segments(
-    segments: &mut Vec<CanonicalSegment>,
-    diarized: &[DiarizedSegment],
-    next_segment_id: &mut u64,
-) -> bool {
-    let mut changed = false;
-
-    for segment in diarized {
-        let candidate = CanonicalSegment {
-            id: *next_segment_id,
-            lane: segment.lane,
-            speaker: segment.speaker,
-            start_ms: segment.start_ms,
-            end_ms: segment.end_ms,
-            text: segment.text.trim().to_string(),
-        };
-
-        let len_before = segments.len();
-        let tail_before = segments.last().cloned();
-        if merge_segment(segments, candidate, segment.force_new).is_some() {
-            if segments.len() > len_before {
-                *next_segment_id += 1;
-                changed = true;
-            } else if segments.last() != tail_before.as_ref() {
-                changed = true;
-            }
-        }
-    }
-
-    changed
 }
 
 fn updated_existing_tail<'a>(
@@ -708,6 +638,17 @@ fn unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn samples_to_ms(samples: usize) -> u64 {
-    (samples as u64 * 1_000) / TARGET_SAMPLE_RATE as u64
+fn run_native_ambient_final_pass(
+    transcriber: &Transcriber,
+    samples: &[f32],
+) -> Result<AmbientFinalPassResult, String> {
+    run_native_diarization_final_pass(samples, transcriber)
+}
+
+fn append_warning(existing: Option<&str>, incoming: &str) -> String {
+    match existing.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(existing) if existing.contains(incoming) => existing.to_string(),
+        Some(existing) => format!("{existing}\n{incoming}"),
+        None => incoming.to_string(),
+    }
 }

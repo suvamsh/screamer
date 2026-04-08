@@ -20,11 +20,22 @@ cleanup() {
 trap cleanup EXIT
 
 for model in ggml-tiny.en.bin ggml-base.en.bin ggml-small.en.bin; do
-    : > "$TMP_MODELS_DIR/$model"
+    printf 'placeholder model\n' > "$TMP_MODELS_DIR/$model"
 done
-: > "$TMP_SUMMARY_MODELS_DIR/gemma-3-4b-it-q4.gguf"
+printf 'placeholder summary model\n' > "$TMP_SUMMARY_MODELS_DIR/gemma-3-1b-it-q4_k_m.gguf"
+printf 'placeholder vision model\n' > "$TMP_SUMMARY_MODELS_DIR/gemma-3-4b-it-q4.gguf"
 
-APP="$APP" MODELS_DIR="$TMP_MODELS_DIR" SUMMARY_MODELS_DIR="$TMP_SUMMARY_MODELS_DIR" SKIP_BUILD=1 BIN_PATH="$BIN_PATH" ./bundle.sh
+SUMMARY_HELPER_PATH="${SUMMARY_HELPER_PATH:-target/release/screamer_summary_helper}"
+VISION_HELPER_PATH="${VISION_HELPER_PATH:-target/release/screamer_vision_helper}"
+
+APP="$APP" \
+  MODELS_DIR="$TMP_MODELS_DIR" \
+  SUMMARY_MODELS_DIR="$TMP_SUMMARY_MODELS_DIR" \
+  SKIP_BUILD=1 \
+  BIN_PATH="$BIN_PATH" \
+  SUMMARY_HELPER_PATH="$SUMMARY_HELPER_PATH" \
+  VISION_HELPER_PATH="$VISION_HELPER_PATH" \
+  ./bundle.sh
 
 test -x "$APP/Contents/MacOS/Screamer"
 test -f "$APP/Contents/Info.plist"
@@ -33,6 +44,7 @@ test -f "$APP/Contents/Resources/image.png"
 test -f "$APP/Contents/Resources/models/ggml-tiny.en.bin"
 test -f "$APP/Contents/Resources/models/ggml-base.en.bin"
 test -f "$APP/Contents/Resources/models/ggml-small.en.bin"
+test -f "$APP/Contents/Resources/models/summary/gemma-3-1b-it-q4_k_m.gguf"
 test -f "$APP/Contents/Resources/models/summary/gemma-3-4b-it-q4.gguf"
 
 bundle_id="$("$PLUTIL_BIN" -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"

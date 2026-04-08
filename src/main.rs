@@ -1,4 +1,7 @@
 mod ambient_controller;
+mod ambient_final_pass;
+mod ambient_pipeline;
+mod ambient_whisperx;
 mod app;
 mod branding;
 mod bundled_llm;

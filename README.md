@@ -133,6 +133,7 @@ Config lives at `~/Library/Application Support/Screamer/config.json`:
   "sound_effects": true,
   "ambient_microphone": true,
   "ambient_system_audio": true,
+  "ambient_final_backend": "native",
   "summary_backend": "bundled",
   "summary_ollama_model": "gemma4:latest",
   "show_accessibility_helper_on_launch": true,
@@ -150,10 +151,87 @@ Key settings:
 - `sound_effects`: start and finish cue sounds
 - `ambient_microphone`: enable the microphone lane for ambient notetaker sessions
 - `ambient_system_audio`: request the system-output lane for ambient notetaker sessions
+- `ambient_final_backend`: final ambient transcript backend, `native` or `native_diarization`
 - `summary_backend`: `bundled` or `ollama`
 - `summary_ollama_model`: local Ollama model to use when `summary_backend` is `ollama`
 - `show_accessibility_helper_on_launch`: whether the helper window should appear on first launch
 - `accessibility_helper_dismissed`: remembers whether the helper window was dismissed
+
+## Native Ambient Final Pass
+
+Screamer now supports an optional ambient-only native final pass called `native_diarization`.
+
+- Live ambient notes stay on the native Screamer pipeline while the session is running
+- When you stop the session, Screamer can regenerate the final transcript with a native diarization/resegmentation pass
+- Push-to-talk dictation is unchanged
+
+This backend reuses Screamer's native Whisper decode for the transcript backbone and applies a native speaker-attribution pass over the final session audio. Prepared ambient diarization assets are local-only for now and are not bundled with the app.
+
+### Setup
+
+1. Export your segmentation and embedding models to ONNX outside the app.
+
+2. Install the exported ONNX files into Screamer's local asset cache:
+
+```bash
+python3 scripts/prepare_ambient_diarization_assets.py \
+  --asset-version pyannote-community-1-v1 \
+  --segmentation-onnx /absolute/path/to/segmentation.onnx \
+  --embedding-onnx /absolute/path/to/embedding.onnx
+```
+
+3. In Screamer Settings, set `Ambient final pass` to `Native Diarization`.
+
+Notes:
+
+- Runtime inference stays local
+- The ONNX Runtime CoreML backend currently builds behind `--features ambient-ort-coreml`
+- On Apple Silicon, the downloaded ORT CoreML binary expects an Xcode/macOS SDK new enough to expose `MLComputePlan` and `MLOptimizationHints` (Xcode 15+ is the safe baseline)
+- If the native final pass fails, Screamer falls back to the native ambient transcript for that session
+- Exported assets are local development artifacts for this iteration and are not bundled into `Screamer.app`
+
+### Environment Variables
+
+- `SCREAMER_AMBIENT_DIARIZATION_DIR`: override the ambient diarization asset directory
+- `SCREAMER_HF_TOKEN`: reserved for developer-side asset preparation workflows
+
+## Ambient Eval Harness
+
+Use the manifest-driven harness to compare the current native ambient path, the native final pass, and the optional legacy Python benchmark.
+
+Example manifest:
+
+```json
+{
+  "model": "base",
+  "cases": [
+    {
+      "id": "two-speaker-meeting",
+      "required": true,
+      "audio_path": "/absolute/path/to/two-speaker-meeting.wav",
+      "reference_transcript_path": "/absolute/path/to/two-speaker-meeting.txt",
+      "reference_turns_path": "/absolute/path/to/two-speaker-meeting.turns.json"
+    }
+  ]
+}
+```
+
+Run it with:
+
+```bash
+cargo run --bin ambient_eval -- --manifest /absolute/path/to/ambient-eval.json
+```
+
+Enable the legacy Python benchmark only when you explicitly want it:
+
+```bash
+cargo run --bin ambient_eval -- \
+  --manifest /absolute/path/to/ambient-eval.json \
+  --enable-legacy-python \
+  --baseline-out "$PWD/.screamer-benchmarks/ambient-eval-baseline.json"
+```
+
+The report is emitted as JSON to stdout and includes per-case backend status, speaker/turn metrics, word error rate, real-time factor, peak RSS, and runtime metadata.
 
 ## Privacy and logging
 

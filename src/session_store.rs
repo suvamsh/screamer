@@ -219,6 +219,54 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn replace_segments(
+        &self,
+        session_id: i64,
+        segments: &[CanonicalSegment],
+    ) -> Result<(), String> {
+        let mut conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tx = conn
+            .transaction()
+            .map_err(|err| format!("Failed to start segment replacement transaction: {err}"))?;
+
+        tx.execute(
+            "DELETE FROM session_segments WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|err| format!("Failed to clear existing session segments: {err}"))?;
+
+        for (ordinal, segment) in segments.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO session_segments (
+                    session_id, ordinal, segment_id, lane, speaker, start_ms, end_ms, text
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    session_id,
+                    ordinal as i64,
+                    segment.id as i64,
+                    lane_to_db(segment.lane),
+                    speaker_to_db(segment.speaker),
+                    segment.start_ms as i64,
+                    segment.end_ms as i64,
+                    segment.text,
+                ],
+            )
+            .map_err(|err| format!("Failed to insert replaced session segment: {err}"))?;
+        }
+
+        tx.execute(
+            "UPDATE sessions SET updated_at_ms = ?2 WHERE id = ?1",
+            params![session_id, unix_ms()],
+        )
+        .map_err(|err| format!("Failed to update session timestamp: {err}"))?;
+        tx.commit()
+            .map_err(|err| format!("Failed to commit replaced session segments: {err}"))?;
+        Ok(())
+    }
+
     pub fn update_last_segment(
         &self,
         session_id: i64,
