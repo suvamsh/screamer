@@ -34,6 +34,9 @@ fn main() {
     logging::init_stderr_log();
 
     eprintln!("[screamer] Starting up (PID: {})", std::process::id());
+    if let Some(path) = logging::active_log_path() {
+        eprintln!("[screamer] Log file: {}", path.display());
+    }
 
     // Initialize logging
     oslog::OsLogger::new("com.screamer.app")

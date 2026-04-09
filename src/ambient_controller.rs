@@ -1,6 +1,7 @@
 use crate::ambient_final_pass::{run_native_diarization_final_pass, AmbientFinalPassResult};
 use crate::ambient_pipeline::{self, ProcessState};
 use crate::config::{AmbientFinalBackendPreference, Config};
+use crate::logging;
 use crate::recorder::Recorder;
 use crate::session_store::{SessionDetail, SessionStore};
 use crate::summary_backend::SummaryBackendRegistry;
@@ -331,7 +332,21 @@ impl AmbientController {
                 &structured_notes,
                 &transcript_markdown,
             );
-            let _ = store.update_state(session_id, final_state, Some(unix_ms()));
+            let ended_at = unix_ms();
+            let _ = store.update_state(session_id, final_state, Some(ended_at));
+            logging::log_ambient_session_report(
+                "reprocess",
+                session_id,
+                &title,
+                ambient_state_label(final_state),
+                detail.started_at_ms,
+                ended_at,
+                &app_config.summary_backend_label(),
+                detail.summary_template.to_db(),
+                None,
+                &transcript_markdown,
+                &structured_notes,
+            );
         });
         Ok(())
     }
@@ -422,11 +437,19 @@ fn spawn_runtime_worker(
             );
         }
 
-        let (mut live_notes, mut segments, scratch_pad, summary_template, mut warning) = {
+        let (
+            started_at_ms,
+            mut live_notes,
+            mut segments,
+            scratch_pad,
+            summary_template,
+            mut warning,
+        ) = {
             let state = snapshot
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             (
+                state.started_at_ms,
                 state.live_notes.clone(),
                 state.segments.clone(),
                 state.scratch_pad.clone(),
@@ -543,6 +566,20 @@ fn spawn_runtime_worker(
         );
         let _ = store.update_state(session_id, final_state, Some(ended_at));
 
+        logging::log_ambient_session_report(
+            "recording",
+            session_id,
+            &title,
+            ambient_state_label(final_state),
+            started_at_ms,
+            ended_at,
+            &app_config.summary_backend_label(),
+            summary_template.to_db(),
+            warning.as_deref(),
+            &transcript_markdown,
+            &structured_notes,
+        );
+
         if let Ok(mut state) = snapshot.lock() {
             state.title = title;
             state.state = final_state;
@@ -651,6 +688,16 @@ fn unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn ambient_state_label(state: AmbientSessionState) -> &'static str {
+    match state {
+        AmbientSessionState::Idle => "idle",
+        AmbientSessionState::Recording => "recording",
+        AmbientSessionState::Processing => "processing",
+        AmbientSessionState::Completed => "completed",
+        AmbientSessionState::Failed => "failed",
+    }
 }
 
 fn run_native_ambient_final_pass(

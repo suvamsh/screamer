@@ -237,7 +237,8 @@ The report is emitted as JSON to stdout and includes per-case backend status, sp
 
 - Transcription runs locally. Screamer does not send audio or text to a cloud service.
 - Runtime logs are written to `~/Library/Logs/Screamer/screamer.log` by default.
-- Transcript contents are not logged by default.
+- Ambient sessions now append a shareable report block to that same log file with the final transcript and summary, so beta testers can send one file after using the app.
+- Dictation and vision transcript contents are still not logged by default.
 - Set `SCREAMER_LOG_TRANSCRIPTS=1` only when you explicitly want transcript text in logs for debugging.
 - Set `SCREAMER_LOG_FILE=/custom/path.log` to override the log file location.
 
