@@ -305,10 +305,10 @@ impl AmbientController {
                 )
                 .map(|notes| notes.to_markdown())
                 .unwrap_or_else(|err| {
-                    format!(
+                    screamer_core::ambient::polish_summary_markdown(&format!(
                         "## Summary\n\n{}\n\n## Key Points\n\n- {}\n",
                         title_hint, err
-                    )
+                    ))
                 });
             let transcript_markdown = live_notes.clone();
 
@@ -514,10 +514,10 @@ fn spawn_runtime_worker(
             )
             .map(|notes| notes.to_markdown())
             .unwrap_or_else(|err| {
-                format!(
+                screamer_core::ambient::polish_summary_markdown(&format!(
                     "## Summary\n\n{}\n\n## Key Points\n\n- {}\n",
                     title_hint, err
-                )
+                ))
             });
         let transcript_markdown = screamer_core::ambient::segments_to_transcript(&segments);
 

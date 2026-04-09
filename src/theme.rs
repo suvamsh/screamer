@@ -77,6 +77,41 @@ pub fn card_border(appearance: AppAppearance) -> Retained<NSColor> {
     }
 }
 
+pub fn session_panel_background(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.095, 0.082, 0.070, 1.0),
+        AppAppearance::Light => srgb(0.985, 0.975, 0.955, 1.0),
+    }
+}
+
+pub fn session_panel_border(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.93, 0.83, 0.58, 0.28),
+        AppAppearance::Light => srgb(0.36, 0.28, 0.16, 0.16),
+    }
+}
+
+pub fn scratch_pad_background(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.12, 0.102, 0.085, 1.0),
+        AppAppearance::Light => srgb(1.0, 0.985, 0.96, 1.0),
+    }
+}
+
+pub fn scratch_pad_border(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.95, 0.79, 0.42, 0.42),
+        AppAppearance::Light => srgb(0.48, 0.34, 0.14, 0.24),
+    }
+}
+
+pub fn scratch_pad_hint(appearance: AppAppearance) -> Retained<NSColor> {
+    match appearance {
+        AppAppearance::Dark => srgb(0.92, 0.80, 0.52, 0.88),
+        AppAppearance::Light => srgb(0.52, 0.36, 0.12, 0.88),
+    }
+}
+
 pub fn logo_badge_background(appearance: AppAppearance) -> Retained<NSColor> {
     match appearance {
         AppAppearance::Dark => srgb(0.12, 0.10, 0.08, 0.0),

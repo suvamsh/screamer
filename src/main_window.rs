@@ -12,14 +12,19 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
+use objc2::AnyThread;
 use objc2_app_kit::{
     NSBackingStoreType, NSBorderType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSImageScaling, NSImageView, NSLineBreakMode, NSPopUpButton,
-    NSScrollView, NSSegmentedControl, NSSwitch, NSTextAlignment, NSTextField, NSTextView, NSView,
-    NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSControlStateValueOn, NSFocusRingType, NSFont, NSImageScaling, NSImageView, NSLineBreakMode,
+    NSPopUpButton, NSScrollView, NSSegmentedControl, NSSwitch, NSTextAlignment, NSTextField,
+    NSTextView, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
-use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSAttributedString, NSAttributedStringMarkdownInterpretedSyntax,
+    NSAttributedStringMarkdownParsingFailurePolicy, NSAttributedStringMarkdownParsingOptions,
+    NSString,
+};
 use screamer_core::ambient::{CanonicalSegment, SummaryTemplate};
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
@@ -65,6 +70,7 @@ pub struct MainWindow {
     session_stop_button: Retained<NSButton>,
     scratch_pad_scroll: Retained<NSScrollView>,
     scratch_pad_text: Retained<NSTextView>,
+    scratch_pad_hint: Retained<NSTextField>,
     session_activity_heading: Retained<NSTextField>,
     transcript_scroll: Retained<NSScrollView>,
     transcript_container: Retained<NSView>,
@@ -90,6 +96,7 @@ pub struct MainWindow {
     loaded_session_id: Cell<i64>,
     last_rendered_segment_count: Cell<usize>,
     last_rendered_segment_signature: RefCell<String>,
+    last_rendered_summary_markdown: RefCell<String>,
     last_persisted_notes: RefCell<String>,
     last_persisted_scratch_pad: RefCell<String>,
     last_editor_persist_at: RefCell<Instant>,
@@ -504,23 +511,76 @@ impl MainWindow {
         );
         session_view.addSubview(&session_workspace);
 
+        let workspace_inner_x = 24.0;
+        let workspace_inner_width = session_workspace_width - workspace_inner_x * 2.0;
+        let workspace_top_padding = 20.0;
+        let workspace_bottom_padding = 24.0;
+        let section_heading_height = 22.0;
+        let section_heading_gap = 12.0;
+        let section_gap = 18.0;
+        let available_editor_height = session_workspace_height
+            - workspace_top_padding
+            - workspace_bottom_padding
+            - section_heading_height * 2.0
+            - section_heading_gap * 2.0
+            - section_gap;
+        let activity_panel_height = (available_editor_height * 0.56).round();
+        let notes_editor_height = available_editor_height - activity_panel_height;
+        let notes_editor_frame = CGRect::new(
+            CGPoint::new(workspace_inner_x, workspace_bottom_padding),
+            CGSize::new(workspace_inner_width, notes_editor_height),
+        );
+        let notes_heading_frame = CGRect::new(
+            CGPoint::new(
+                workspace_inner_x,
+                notes_editor_frame.origin.y + notes_editor_frame.size.height + section_heading_gap,
+            ),
+            CGSize::new(220.0, section_heading_height),
+        );
+        let activity_panel_frame = CGRect::new(
+            CGPoint::new(
+                workspace_inner_x,
+                notes_heading_frame.origin.y + section_heading_height + section_gap,
+            ),
+            CGSize::new(workspace_inner_width, activity_panel_height),
+        );
+        let activity_heading_frame = CGRect::new(
+            CGPoint::new(
+                workspace_inner_x,
+                activity_panel_frame.origin.y
+                    + activity_panel_frame.size.height
+                    + section_heading_gap,
+            ),
+            CGSize::new(220.0, section_heading_height),
+        );
+
         let notes_heading = text_label(
             mtm,
-            "Notes",
-            CGRect::new(
-                CGPoint::new(24.0, session_workspace_height - 42.0),
-                CGSize::new(220.0, 22.0),
-            ),
+            "Scratch pad",
+            notes_heading_frame,
             18.0,
             &theme::title_text(config.appearance),
             true,
         );
         session_workspace.addSubview(&notes_heading);
 
-        let notes_editor_frame = CGRect::new(
-            CGPoint::new(24.0, 24.0),
-            CGSize::new(644.0, session_workspace_height - 78.0),
+        let scratch_pad_hint = text_label(
+            mtm,
+            "Click here to type notes, fixes, or follow-ups for the summary.",
+            CGRect::new(
+                CGPoint::new(
+                    workspace_inner_x + 232.0,
+                    notes_heading_frame.origin.y + 3.0,
+                ),
+                CGSize::new(workspace_inner_width - 232.0, 16.0),
+            ),
+            12.5,
+            &theme::scratch_pad_hint(config.appearance),
+            false,
         );
+        scratch_pad_hint.setAlignment(NSTextAlignment::Right);
+        session_workspace.addSubview(&scratch_pad_hint);
+
         let (scratch_pad_scroll, scratch_pad_text) =
             editor_scroll_view(mtm, notes_editor_frame, config.appearance, true);
         session_workspace.addSubview(&scratch_pad_scroll);
@@ -528,31 +588,25 @@ impl MainWindow {
         let session_activity_heading = text_label(
             mtm,
             "Live transcript",
-            CGRect::new(
-                CGPoint::new(694.0, session_workspace_height - 42.0),
-                CGSize::new(160.0, 22.0),
-            ),
+            activity_heading_frame,
             18.0,
             &theme::title_text(config.appearance),
             true,
         );
         session_workspace.addSubview(&session_activity_heading);
 
-        let activity_panel_frame = CGRect::new(
-            CGPoint::new(694.0, 24.0),
-            CGSize::new(304.0, session_workspace_height - 78.0),
-        );
         let transcript_scroll = {
             let scroll = NSScrollView::new(mtm);
             scroll.setFrame(activity_panel_frame);
             scroll.setHasVerticalScroller(true);
             scroll.setBorderType(NSBorderType::NoBorder);
             scroll.setDrawsBackground(false);
-            style_surface(
+            style_surface_with_border_width(
                 &scroll,
-                &theme::surface_background(config.appearance),
-                &theme::card_border(config.appearance),
+                &theme::session_panel_background(config.appearance),
+                &theme::session_panel_border(config.appearance),
                 18.0,
+                1.25,
             );
             scroll
         };
@@ -570,7 +624,10 @@ impl MainWindow {
         let session_template_popup = popup_button(
             mtm,
             CGRect::new(
-                CGPoint::new(812.0, session_workspace_height - 44.0),
+                CGPoint::new(
+                    workspace_inner_x + workspace_inner_width - 186.0,
+                    activity_heading_frame.origin.y - 2.0,
+                ),
                 CGSize::new(186.0, 26.0),
             ),
             handler,
@@ -584,6 +641,7 @@ impl MainWindow {
 
         let (session_structured_scroll, session_structured_text) =
             editor_scroll_view(mtm, activity_panel_frame, config.appearance, false);
+        session_structured_text.setRichText(true);
         session_structured_scroll.setHidden(true);
         session_workspace.addSubview(&session_structured_scroll);
 
@@ -928,6 +986,7 @@ impl MainWindow {
             session_stop_button,
             scratch_pad_scroll,
             scratch_pad_text,
+            scratch_pad_hint,
             session_activity_heading,
             transcript_scroll,
             transcript_container,
@@ -953,6 +1012,7 @@ impl MainWindow {
             loaded_session_id: Cell::new(0),
             last_rendered_segment_count: Cell::new(0),
             last_rendered_segment_signature: RefCell::new(String::new()),
+            last_rendered_summary_markdown: RefCell::new(String::new()),
             last_persisted_notes: RefCell::new(String::new()),
             last_persisted_scratch_pad: RefCell::new(String::new()),
             last_editor_persist_at: RefCell::new(Instant::now()),
@@ -1223,8 +1283,8 @@ impl MainWindow {
             self.last_rendered_segment_count.set(usize::MAX);
             self.last_rendered_segment_signature
                 .replace("__invalidated__".to_string());
-            self.session_structured_text
-                .setString(&NSString::from_str(&session.structured_notes));
+            self.last_rendered_summary_markdown
+                .replace("__invalidated__".to_string());
             self.last_persisted_notes
                 .replace(session.live_notes.clone());
             self.scratch_pad_text
@@ -1248,10 +1308,14 @@ impl MainWindow {
                 .replace(session.live_notes.clone());
         }
 
-        let structured_text = self.session_structured_text.string().to_string();
-        if structured_text != session.structured_notes {
-            self.session_structured_text
-                .setString(&NSString::from_str(&session.structured_notes));
+        if *self.last_rendered_summary_markdown.borrow() != session.structured_notes {
+            render_markdown_text_view(
+                &self.session_structured_text,
+                &session.structured_notes,
+                appearance,
+            );
+            self.last_rendered_summary_markdown
+                .replace(session.structured_notes.clone());
         }
 
         self.session_title
@@ -1303,7 +1367,7 @@ impl MainWindow {
         self.session_reprocess_button.setHidden(!is_finished);
         self.session_reprocess_button.setEnabled(is_finished);
 
-        // Notes stay primary; the right rail switches from transcript to summary when finished.
+        // The top panel switches from transcript to summary when the session finishes.
         self.transcript_scroll.setHidden(is_finished);
         self.session_structured_scroll.setHidden(!is_finished);
         self.session_template_popup.setHidden(!is_finished);
@@ -1332,6 +1396,7 @@ impl MainWindow {
 
         // Lock scratch pad during processing (read-only); editable otherwise
         self.scratch_pad_text.setEditable(!is_processing);
+        self.scratch_pad_hint.setHidden(is_processing);
 
         // Status label gets color treatment for processing
         if is_processing {
@@ -1799,19 +1864,64 @@ fn editor_scroll_view(
     text_view.setSelectable(true);
     text_view.setRichText(false);
     text_view.setDrawsBackground(true);
-    text_view.setBackgroundColor(&theme::surface_background(appearance));
+    if editable {
+        text_view.setBackgroundColor(&theme::scratch_pad_background(appearance));
+        text_view.setInsertionPointColor(Some(&theme::brand_gold()));
+    } else {
+        text_view.setBackgroundColor(&theme::session_panel_background(appearance));
+    }
     text_view.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+    text_view.setTextColor(Some(&theme::body_text(appearance)));
     text_view.setString(&NSString::from_str(""));
     text_view.setTextContainerInset(CGSize::new(12.0, 14.0));
 
-    style_surface(
+    let background = if editable {
+        theme::scratch_pad_background(appearance)
+    } else {
+        theme::session_panel_background(appearance)
+    };
+    let border = if editable {
+        theme::scratch_pad_border(appearance)
+    } else {
+        theme::session_panel_border(appearance)
+    };
+    style_surface_with_border_width(
         &scroll,
-        &theme::surface_background(appearance),
-        &theme::card_border(appearance),
+        &background,
+        &border,
         18.0,
+        if editable { 1.35 } else { 1.2 },
     );
 
     (scroll, text_view)
+}
+
+fn render_markdown_text_view(text_view: &NSTextView, markdown: &str, appearance: AppAppearance) {
+    let markdown_string = NSString::from_str(markdown);
+    let options = NSAttributedStringMarkdownParsingOptions::new();
+    options.setInterpretedSyntax(NSAttributedStringMarkdownInterpretedSyntax::Full);
+    options.setFailurePolicy(
+        NSAttributedStringMarkdownParsingFailurePolicy::ReturnPartiallyParsedIfPossible,
+    );
+
+    match NSAttributedString::initWithMarkdownString_options_baseURL_error(
+        NSAttributedString::alloc(),
+        &markdown_string,
+        Some(&options),
+        None,
+    ) {
+        Ok(attributed) => unsafe {
+            text_view.setTextColor(Some(&theme::body_text(appearance)));
+            if let Some(text_storage) = text_view.textStorage() {
+                text_storage.beginEditing();
+                text_storage.setAttributedString(&attributed);
+                text_storage.endEditing();
+            } else {
+                text_view.setString(&markdown_string);
+            }
+        },
+        Err(_) => text_view.setString(&markdown_string),
+    }
 }
 
 fn add_settings_row(
@@ -2021,8 +2131,22 @@ fn text_field(
     field.setStringValue(&NSString::from_str(value));
     field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     field.setTextColor(Some(&theme::title_text(appearance)));
-    field.setBackgroundColor(Some(&theme::surface_background(appearance)));
-    field.setBezeled(true);
+    field.setBackgroundColor(Some(&theme::session_panel_background(appearance)));
+    field.setDrawsBackground(true);
+    field.setBordered(false);
+    field.setBezeled(false);
+    field.setEditable(true);
+    field.setFont(Some(&NSFont::systemFontOfSize(13.5)));
+    field.setUsesSingleLineMode(true);
+    field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    field.setFocusRingType(NSFocusRingType::None);
+    style_surface_with_border_width(
+        &field,
+        &theme::session_panel_background(appearance),
+        &theme::session_panel_border(appearance),
+        14.0,
+        1.1,
+    );
     field
 }
 
@@ -2040,11 +2164,21 @@ fn surface_view(
 }
 
 fn style_surface(view: &NSView, background: &NSColor, border: &NSColor, radius: f64) {
+    style_surface_with_border_width(view, background, border, radius, 1.0);
+}
+
+fn style_surface_with_border_width(
+    view: &NSView,
+    background: &NSColor,
+    border: &NSColor,
+    radius: f64,
+    border_width: f64,
+) {
     view.setWantsLayer(true);
     if let Some(layer) = view.layer() {
         layer.setCornerRadius(radius as CGFloat);
         layer.setMasksToBounds(true);
-        layer.setBorderWidth(1.0);
+        layer.setBorderWidth(border_width);
         unsafe {
             let bg_color: *const std::ffi::c_void = msg_send![background, CGColor];
             let border_color: *const std::ffi::c_void = msg_send![border, CGColor];

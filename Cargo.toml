@@ -30,6 +30,8 @@ block2 = "0.6"
 whisper-rs = { version = "0.14", features = ["metal"] }
 objc2-foundation = { version = "0.3", features = [
     "NSDate",
+    "NSAttributedString",
+    "NSError",
     "NSString",
     "NSTimer",
     "NSThread",
@@ -39,6 +41,7 @@ objc2-foundation = { version = "0.3", features = [
     "NSRange",
     "NSGeometry",
     "NSArray",
+    "NSURL",
 ] }
 objc2-core-foundation = { version = "0.3", features = [
     "CFCGTypes",
@@ -83,6 +86,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSSegmentedControl",
     "NSAppearance",
     "NSTextView",
+    "NSTextStorage",
     "NSWindowScripting",
     "NSSound",
 ] }

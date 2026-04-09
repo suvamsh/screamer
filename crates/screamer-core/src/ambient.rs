@@ -217,16 +217,19 @@ pub struct StructuredNotes {
 
 impl StructuredNotes {
     pub fn to_markdown(&self) -> String {
-        if let Some(raw) = &self.raw_notes {
-            return raw.trim().to_string();
-        }
-        let mut out = String::new();
-        push_section(&mut out, "Summary", &[self.summary.clone()]);
-        push_section(&mut out, "Key Points", &self.key_points);
-        push_section(&mut out, "Decisions", &self.decisions);
-        push_section(&mut out, "Action Items", &self.action_items);
-        push_section(&mut out, "Open Questions", &self.open_questions);
-        out.trim().to_string()
+        let markdown = if let Some(raw) = &self.raw_notes {
+            raw.trim().to_string()
+        } else {
+            let mut out = String::new();
+            push_section(&mut out, "Summary", &[self.summary.clone()]);
+            push_section(&mut out, "Key Points", &self.key_points);
+            push_section(&mut out, "Decisions", &self.decisions);
+            push_section(&mut out, "Action Items", &self.action_items);
+            push_section(&mut out, "Open Questions", &self.open_questions);
+            out.trim().to_string()
+        };
+
+        polish_summary_markdown(&markdown)
     }
 }
 
@@ -655,6 +658,126 @@ fn push_section(out: &mut String, heading: &str, lines: &[String]) {
     out.push('\n');
 }
 
+pub fn polish_summary_markdown(markdown: &str) -> String {
+    let normalized = markdown.replace("\r\n", "\n");
+    let mut polished = Vec::<String>::new();
+    let mut previous_blank = true;
+
+    for raw_line in normalized.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            if !previous_blank && !polished.is_empty() {
+                polished.push(String::new());
+            }
+            previous_blank = true;
+            continue;
+        }
+
+        if let Some(heading) = markdown_heading_text(line) {
+            let heading = normalize_summary_heading(heading);
+            if heading.is_empty() {
+                continue;
+            }
+            if !polished.is_empty() && !previous_blank {
+                polished.push(String::new());
+            }
+            polished.push(format!("# {heading}"));
+            polished.push(String::new());
+            previous_blank = true;
+            continue;
+        }
+
+        if let Some(item) = markdown_list_item_body(line) {
+            polished.push(format!("- {}", emphasize_summary_bullet(item)));
+            previous_blank = false;
+            continue;
+        }
+
+        polished.push(collapse_summary_spaces(line));
+        previous_blank = false;
+    }
+
+    while polished.last().is_some_and(|line| line.is_empty()) {
+        polished.pop();
+    }
+
+    polished.join("\n")
+}
+
+fn markdown_heading_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let heading = trimmed.strip_prefix('#')?;
+    Some(heading.trim_start_matches('#').trim())
+}
+
+fn markdown_list_item_body(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if let Some(body) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))
+        .or_else(|| trimmed.strip_prefix("• "))
+    {
+        return Some(body.trim());
+    }
+
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+
+    let suffix = trimmed[digit_count..]
+        .strip_prefix('.')
+        .or_else(|| trimmed[digit_count..].strip_prefix(')'))?;
+    let body = suffix.trim_start();
+    (!body.is_empty()).then_some(body)
+}
+
+fn normalize_summary_heading(heading: &str) -> String {
+    collapse_summary_spaces(
+        heading
+            .trim_matches(|ch: char| matches!(ch, '*' | '`' | '"' | '\''))
+            .trim_end_matches(':')
+            .trim(),
+    )
+}
+
+fn emphasize_summary_bullet(item: &str) -> String {
+    let normalized = collapse_summary_spaces(item);
+    if normalized.is_empty() || normalized.starts_with("**") {
+        return normalized;
+    }
+
+    let Some((label, detail)) = normalized.split_once(':') else {
+        return normalized;
+    };
+    let label = collapse_summary_spaces(label);
+    let detail = detail.trim();
+    if detail.is_empty()
+        || label.is_empty()
+        || label.chars().count() > 36
+        || label.split_whitespace().count() > 5
+        || matches!(label.chars().last(), Some('.' | '?' | '!'))
+        || label.contains("**")
+    {
+        return normalized;
+    }
+
+    if !label.chars().all(|ch| {
+        ch.is_alphanumeric()
+            || ch.is_whitespace()
+            || matches!(ch, '&' | '/' | '+' | '-' | '(' | ')' | '\'')
+    }) {
+        return normalized;
+    }
+
+    format!("**{label}:** {detail}")
+}
+
+fn collapse_summary_spaces(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,7 +906,44 @@ mod tests {
 
         assert_eq!(
             notes.to_markdown(),
-            "## Shipping\n- Calendar invite flow is ready."
+            "# Shipping\n\n- Calendar invite flow is ready."
+        );
+    }
+
+    #[test]
+    fn raw_notes_markdown_gets_a_final_polish_pass() {
+        let notes = StructuredNotes {
+            raw_notes: Some(
+                "## Drinks Inventory Review\n- Cider: remove\n- IPA: keep\n\n## Next Steps\n- Suvamsh: pull out the cider from the selection".to_string(),
+            ),
+            transcript: "Person A: calendar invite flow".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            notes.to_markdown(),
+            "# Drinks Inventory Review\n\n- **Cider:** remove\n- **IPA:** keep\n\n# Next Steps\n\n- **Suvamsh:** pull out the cider from the selection"
+        );
+    }
+
+    #[test]
+    fn structured_notes_markdown_uses_prominent_sections_and_keeps_summary_plain() {
+        let notes = StructuredNotes {
+            summary: "The release stays on track for next week.".to_string(),
+            key_points: vec![
+                "Owner: Maya".to_string(),
+                "Risk: timezone confusion in reminders".to_string(),
+            ],
+            decisions: vec!["Ship if QA passes by Thursday.".to_string()],
+            action_items: vec!["Maya: pair on the blocker tomorrow.".to_string()],
+            open_questions: vec!["None".to_string()],
+            transcript: String::new(),
+            raw_notes: None,
+        };
+
+        assert_eq!(
+            notes.to_markdown(),
+            "# Summary\n\nThe release stays on track for next week.\n\n# Key Points\n\n- **Owner:** Maya\n- **Risk:** timezone confusion in reminders\n\n# Decisions\n\n- Ship if QA passes by Thursday.\n\n# Action Items\n\n- **Maya:** pair on the blocker tomorrow.\n\n# Open Questions\n\n- None"
         );
     }
 }
