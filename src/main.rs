@@ -7,6 +7,7 @@ mod branding;
 mod bundled_llm;
 mod config;
 mod diarization;
+mod highlight;
 mod hotkey;
 mod loading;
 mod logging;

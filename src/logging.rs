@@ -49,6 +49,16 @@ pub fn log_transcript(label: &str, text: &str) {
     }
 }
 
+pub fn log_flow_event(flow: &str, stage: &str, message: &str) {
+    eprintln!("[screamer][{flow}][{stage}] {message}");
+}
+
+pub fn log_flow_block(flow: &str, stage: &str, text: &str) {
+    eprintln!("[screamer][{flow}][{stage}] BEGIN");
+    write_block(text);
+    eprintln!("[screamer][{flow}][{stage}] END");
+}
+
 pub fn log_ambient_session_report(
     source: &str,
     session_id: i64,

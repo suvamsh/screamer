@@ -19,9 +19,23 @@ const SCREENSHOT_IMAGE_OPTIONS: u32 =
 
 static NEXT_SCREENSHOT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenCaptureBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CapturedScreen {
+    pub path: PathBuf,
+    pub bounds: ScreenCaptureBounds,
+}
+
 /// Captures the whole desktop and saves it as a PNG to a temporary file.
-/// Returns the path to the saved screenshot.
-pub fn capture_screen() -> Result<PathBuf, String> {
+/// Returns the saved screenshot plus the virtual desktop bounds used to capture it.
+pub fn capture_screen() -> Result<CapturedScreen, String> {
     let (bounds, display_count) = active_display_bounds()?;
     let image = match capture_windows_excluding_self(bounds)? {
         Some(image) => image,
@@ -44,7 +58,15 @@ pub fn capture_screen() -> Result<PathBuf, String> {
         display_count
     );
 
-    Ok(path)
+    Ok(CapturedScreen {
+        path,
+        bounds: ScreenCaptureBounds {
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+            width: bounds.size.width,
+            height: bounds.size.height,
+        },
+    })
 }
 
 fn active_display_bounds() -> Result<(CGRect, usize), String> {

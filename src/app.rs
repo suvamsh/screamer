@@ -1,6 +1,7 @@
 use crate::ambient_controller::AmbientController;
 use crate::config::{AppAppearance, Config, SummaryBackendPreference, HOTKEYS, MODELS, POSITIONS};
 use crate::diarization::default_diarization_engine;
+use crate::highlight::HighlightOverlay;
 use crate::logging;
 use crate::main_window::MainWindow;
 use crate::overlay::{Overlay, WAVEFORM_BINS};
@@ -74,6 +75,7 @@ pub struct App {
     pending_completion_sound: Arc<AtomicBool>,
     recording_session: Arc<AtomicU64>,
     vision_overlay_state: Arc<Mutex<crate::overlay::VisionOverlayState>>,
+    highlight_overlay: Rc<RefCell<HighlightOverlay>>,
 }
 
 pub struct AppInitError {
@@ -1157,6 +1159,7 @@ impl App {
             config.overlay_position,
             config.appearance,
         )));
+        let highlight_overlay = Rc::new(RefCell::new(HighlightOverlay::new(mtm)));
         let hotkey = Rc::new(crate::hotkey::Hotkey::new(&config));
         let sound_player = Rc::new(SoundPlayer::new(mtm));
 
@@ -1242,6 +1245,7 @@ impl App {
             pending_completion_sound: Arc::new(AtomicBool::new(false)),
             recording_session: Arc::new(AtomicU64::new(0)),
             vision_overlay_state: Arc::new(Mutex::new(crate::overlay::VisionOverlayState::Hidden)),
+            highlight_overlay,
         })
     }
 
@@ -1426,7 +1430,8 @@ impl App {
         let session_vis = self.recording_session.clone();
         let vision_state_vis_press = self.vision_overlay_state.clone();
         let vision_state_vis_release = self.vision_overlay_state.clone();
-        let vision_screenshot: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
+        let vision_screenshot: Arc<Mutex<Option<crate::screenshot::CapturedScreen>>> =
+            Arc::new(Mutex::new(None));
         let vision_screenshot_release = vision_screenshot.clone();
 
         hotkey.start_on_main_thread(
@@ -1582,13 +1587,28 @@ impl App {
                 }
                 // Capture screenshot immediately
                 match crate::screenshot::capture_screen() {
-                    Ok(path) => {
-                        eprintln!("[screamer] Vision screenshot captured: {}", path.display());
+                    Ok(screenshot) => {
+                        eprintln!(
+                            "[screamer] Vision screenshot captured: {}",
+                            screenshot.path.display()
+                        );
+                        logging::log_flow_event(
+                            "vision",
+                            "capture",
+                            &format!(
+                                "path={} bounds=({:.1}, {:.1}, {:.1}, {:.1})",
+                                screenshot.path.display(),
+                                screenshot.bounds.x,
+                                screenshot.bounds.y,
+                                screenshot.bounds.width,
+                                screenshot.bounds.height
+                            ),
+                        );
                         if let Ok(mut ss) = vision_screenshot.lock() {
                             if let Some(old) = ss.take() {
-                                let _ = std::fs::remove_file(&old);
+                                let _ = std::fs::remove_file(&old.path);
                             }
-                            *ss = Some(path);
+                            *ss = Some(screenshot);
                         }
                     }
                     Err(err) => {
@@ -1600,8 +1620,8 @@ impl App {
 
                 let clear_vision_screenshot = || {
                     if let Ok(mut ss) = vision_screenshot.lock() {
-                        if let Some(path) = ss.take() {
-                            let _ = std::fs::remove_file(path);
+                        if let Some(screenshot) = ss.take() {
+                            let _ = std::fs::remove_file(screenshot.path);
                         }
                     }
                 };
@@ -1658,7 +1678,7 @@ impl App {
                     if let Ok(mut t) = live_transcript_vis_release.lock() { t.clear(); }
                     eprintln!("[screamer] Vision recording stopped, {} samples", samples.len());
 
-                    let screenshot_path = vision_screenshot_release
+                    let screenshot = vision_screenshot_release
                         .lock()
                         .ok()
                         .and_then(|mut ss| ss.take());
@@ -1669,8 +1689,8 @@ impl App {
                             if sfx_vis_release.load(Ordering::Relaxed) {
                                 pending_sound_vis.store(true, Ordering::SeqCst);
                             }
-                            if let Some(path) = screenshot_path.as_ref() {
-                                let _ = std::fs::remove_file(path);
+                            if let Some(screenshot) = screenshot.as_ref() {
+                                let _ = std::fs::remove_file(&screenshot.path);
                             }
                             if let Ok(mut vs) = vision_state_vis_release.lock() {
                                 *vs = crate::overlay::VisionOverlayState::Hidden;
@@ -1682,8 +1702,8 @@ impl App {
                             if sfx_vis_release.load(Ordering::Relaxed) {
                                 pending_sound_vis.store(true, Ordering::SeqCst);
                             }
-                            if let Some(path) = screenshot_path.as_ref() {
-                                let _ = std::fs::remove_file(path);
+                            if let Some(screenshot) = screenshot.as_ref() {
+                                let _ = std::fs::remove_file(&screenshot.path);
                             }
                             if let Ok(mut vs) = vision_state_vis_release.lock() {
                                 *vs = crate::overlay::VisionOverlayState::Hidden;
@@ -1720,21 +1740,44 @@ impl App {
                                 );
                                 logging::log_transcript("Vision transcript", &result.text);
 
-                                if let Some(screenshot_path) = screenshot_path.as_ref() {
+                                if let Some(screenshot) = screenshot.as_ref() {
                                     eprintln!("[screamer] Vision: asking model about screenshot...");
                                     let vision_t0 = std::time::Instant::now();
+                                    logging::log_flow_event(
+                                        "vision",
+                                        "app_dispatch",
+                                        &format!(
+                                            "screenshot={} transcript_chars={}",
+                                            screenshot.path.display(),
+                                            result.text.chars().count()
+                                        ),
+                                    );
                                     match crate::vision::ask_about_screen(
                                         &result.text,
-                                        screenshot_path,
+                                        &screenshot.path,
                                     ) {
-                                        Ok(response) => {
+                                        Ok(vision_result) => {
                                             eprintln!(
                                                 "[screamer] Vision response in {}ms ({} chars):\n{}",
                                                 vision_t0.elapsed().as_millis(),
-                                                response.len(),
-                                                response
+                                                vision_result.text.len(),
+                                                vision_result.text
                                             );
-                                            match crate::speech::speak(&response) {
+                                            logging::log_flow_event(
+                                                "vision",
+                                                "app_result",
+                                                &format!(
+                                                    "latency_ms={} spoken_chars={} highlight={}",
+                                                    vision_t0.elapsed().as_millis(),
+                                                    vision_result.text.chars().count(),
+                                                    vision_result
+                                                        .highlight
+                                                        .as_ref()
+                                                        .map(|point| point.describe())
+                                                        .unwrap_or_else(|| "NONE".to_string())
+                                                ),
+                                            );
+                                            match crate::speech::speak(&vision_result.text) {
                                                 Ok(()) => {
                                                     should_play_completion_sound = false;
                                                 }
@@ -1743,7 +1786,16 @@ impl App {
                                                 }
                                             }
                                             if let Ok(mut vs) = vision_state.lock() {
-                                                *vs = crate::overlay::VisionOverlayState::Response(response);
+                                                let highlight = vision_result.highlight.map(|point| {
+                                                    crate::highlight::HighlightTarget {
+                                                        point,
+                                                        capture_bounds: screenshot.bounds,
+                                                    }
+                                                });
+                                                *vs = crate::overlay::VisionOverlayState::Response(
+                                                    vision_result.text,
+                                                    highlight,
+                                                );
                                             }
                                         }
                                         Err(err) => {
@@ -1779,8 +1831,8 @@ impl App {
                         if should_play_completion_sound && sfx.load(Ordering::Relaxed) {
                             pending_sound.store(true, Ordering::SeqCst);
                         }
-                        if let Some(screenshot_path) = screenshot_path {
-                            let _ = std::fs::remove_file(&screenshot_path);
+                        if let Some(screenshot) = screenshot {
+                            let _ = std::fs::remove_file(&screenshot.path);
                         }
                     });
                 }
@@ -1795,6 +1847,7 @@ impl App {
         let ambient_controller = self.ambient_controller.clone();
         let recorder = self.recorder.clone();
         let overlay = self.overlay.clone();
+        let highlight_overlay = self.highlight_overlay.clone();
         let sound_player = self.sound_player.clone();
         let is_recording = self.is_recording.clone();
         let live_transcription_enabled = self.live_transcription_enabled.clone();
@@ -1827,6 +1880,20 @@ impl App {
 
                 let vision_active =
                     !matches!(vision_state, crate::overlay::VisionOverlayState::Hidden);
+
+                // Manage the screen highlight overlay
+                if let Ok(mut hl) = highlight_overlay.try_borrow_mut() {
+                    match &vision_state {
+                        crate::overlay::VisionOverlayState::Response(_, Some(target)) => {
+                            if !hl.is_visible() {
+                                hl.show(target);
+                            }
+                        }
+                        _ => {
+                            hl.hide();
+                        }
+                    }
+                }
 
                 if let Ok(mut ov) = overlay.try_borrow_mut() {
                     if recording {

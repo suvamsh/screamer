@@ -42,8 +42,8 @@ pub enum VisionOverlayState {
     Hidden,
     /// Vision model is processing (show spinner/loading text).
     Loading,
-    /// Vision model returned a response.
-    Response(String),
+    /// Vision model returned a response, with an optional highlight region.
+    Response(String, Option<crate::highlight::HighlightTarget>),
     /// Vision model errored.
     Error(String),
 }
@@ -365,7 +365,7 @@ impl Overlay {
                     "⏳ Thinking about your screen...".to_string(),
                     theme::overlay_vision_loading_text(self.appearance),
                 ),
-                VisionOverlayState::Response(text) => (
+                VisionOverlayState::Response(text, _) => (
                     format!("✦ {text}"),
                     theme::overlay_vision_label_text(self.appearance),
                 ),

@@ -1095,6 +1095,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2393,6 +2395,7 @@ dependencies = [
  "cpal",
  "dirs",
  "hound",
+ "image",
  "kokoro-micro",
  "libc",
  "llama-cpp-2",
