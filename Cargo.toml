@@ -104,7 +104,7 @@ dirs = "6"
 libc = "0.2"
 log = "0.4"
 oslog = "0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 llama_cpp_2 = { package = "llama-cpp-2", version = "0.1.141", default-features = false, features = ["metal", "mtmd"] }
 hound = "3"
 kokoro-micro = "1.0"
