@@ -1171,8 +1171,7 @@ fn build_model_regions(
             segmentation.hop_ms,
         );
         let global_frame_hop_ms = segmentation.frame_hop_ms.max(1);
-        let global_frame_count =
-            ((audio_duration_ms + global_frame_hop_ms - 1) / global_frame_hop_ms).max(1) as usize;
+        let global_frame_count = audio_duration_ms.div_ceil(global_frame_hop_ms).max(1) as usize;
         let mut score_sum = vec![0.0f32; global_frame_count];
         let mut score_count = vec![0u32; global_frame_count];
 
@@ -1212,7 +1211,7 @@ fn build_model_regions(
 
         let averaged_scores = score_sum
             .into_iter()
-            .zip(score_count.into_iter())
+            .zip(score_count)
             .map(
                 |(sum, count)| {
                     if count == 0 {

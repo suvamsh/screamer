@@ -49,20 +49,15 @@ pub enum AmbientModelInputLayout {
     BatchChannelSamples,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AmbientModelOutputLayout {
     FramesSpeakers,
+    #[default]
     BatchFramesSpeakers,
     BatchSpeakersFrames,
     EmbeddingVector,
     BatchEmbeddingVector,
-}
-
-impl Default for AmbientModelOutputLayout {
-    fn default() -> Self {
-        Self::BatchFramesSpeakers
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,7 +346,7 @@ fn resolve_root(root: &Path) -> Result<Option<AmbientDiarizationAssetSet>, Strin
         .filter(|entry| entry.path().join(ASSET_MANIFEST_NAME).is_file())
         .collect::<Vec<_>>();
 
-    version_dirs.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    version_dirs.sort_by_key(|entry| entry.file_name());
 
     if let Some(entry) = version_dirs.pop() {
         Ok(Some(load_from_root(&entry.path())?))

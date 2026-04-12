@@ -101,7 +101,7 @@ jobs:
           cargo build --locked --release --target aarch64-apple-darwin
           cargo build --locked --release --target x86_64-apple-darwin
           mkdir -p target/universal/release
-          for bin in screamer screamer_summary_helper screamer_vision_helper; do
+          for bin in screamer screamer_summary_helper screamer_tts_helper screamer_vision_helper; do
             arm="target/aarch64-apple-darwin/release/$bin"
             x86="target/x86_64-apple-darwin/release/$bin"
             if [ -f "$arm" ] && [ -f "$x86" ]; then
@@ -115,6 +115,7 @@ jobs:
           APP_VERSION: ${{ steps.meta.outputs.version }}
           BIN_PATH: target/universal/release/screamer
           SUMMARY_HELPER_PATH: target/universal/release/screamer_summary_helper
+          TTS_HELPER_PATH: target/universal/release/screamer_tts_helper
           VISION_HELPER_PATH: target/universal/release/screamer_vision_helper
           SKIP_BUILD: "1"
           CODESIGN_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}

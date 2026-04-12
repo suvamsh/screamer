@@ -70,9 +70,10 @@ impl SpeakerLabel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryTemplate {
+    #[default]
     General,
     OneOnOne,
     TeamMeeting,
@@ -114,12 +115,6 @@ impl SummaryTemplate {
             Self::TeamMeeting => "team_meeting",
             Self::StandUp => "stand_up",
         }
-    }
-}
-
-impl Default for SummaryTemplate {
-    fn default() -> Self {
-        Self::General
     }
 }
 
@@ -221,7 +216,7 @@ impl StructuredNotes {
             raw.trim().to_string()
         } else {
             let mut out = String::new();
-            push_section(&mut out, "Summary", &[self.summary.clone()]);
+            push_section(&mut out, "Summary", std::slice::from_ref(&self.summary));
             push_section(&mut out, "Key Points", &self.key_points);
             push_section(&mut out, "Decisions", &self.decisions);
             push_section(&mut out, "Action Items", &self.action_items);
