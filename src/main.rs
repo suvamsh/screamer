@@ -25,6 +25,8 @@ mod speech;
 mod summary_backend;
 mod theme;
 mod vision;
+mod vision_gemini;
+mod vision_openai;
 
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;

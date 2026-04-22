@@ -2,7 +2,7 @@ use crate::ambient_controller::AmbientController;
 use crate::branding;
 use crate::config::{
     AmbientFinalBackendPreference, AppAppearance, Config, AMBIENT_FINAL_BACKENDS, HOTKEYS, MODELS,
-    POSITIONS,
+    POSITIONS, VISION_PROVIDERS,
 };
 use crate::session_store::{SessionStore, SessionSummary};
 use crate::summary_backend::{SummaryBackendRegistry, SummaryModelOption};
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const WINDOW_WIDTH: f64 = 1360.0;
-const WINDOW_HEIGHT: f64 = 860.0;
+const WINDOW_HEIGHT: f64 = 928.0;
 const SIDEBAR_WIDTH: f64 = 286.0;
 const CONTENT_PADDING: f64 = 26.0;
 const SESSION_LIST_LIMIT: usize = 5;
@@ -84,6 +84,7 @@ pub struct MainWindow {
     settings_view: Retained<NSView>,
     settings_model_popup: Retained<NSPopUpButton>,
     settings_hotkey_popup: Retained<NSPopUpButton>,
+    settings_vision_provider_popup: Retained<NSPopUpButton>,
     settings_position_popup: Retained<NSPopUpButton>,
     settings_appearance_toggle: Retained<NSSegmentedControl>,
     settings_live_switch: Retained<NSSwitch>,
@@ -833,6 +834,27 @@ impl MainWindow {
             &settings_hotkey_popup,
         );
 
+        let settings_vision_provider_popup = popup_button(
+            mtm,
+            CGRect::new(CGPoint::new(468.0, 11.0), CGSize::new(260.0, 32.0)),
+            handler,
+            sel!(selectVisionBackendPopup:),
+        );
+        for entry in VISION_PROVIDERS {
+            settings_vision_provider_popup.addItemWithTitle(&NSString::from_str(entry.label));
+        }
+        add_settings_row(
+            mtm,
+            &settings_view,
+            config.appearance,
+            "Screen help (vision)",
+            CGRect::new(
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 446.0),
+                CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
+            ),
+            &settings_vision_provider_popup,
+        );
+
         let settings_position_popup = popup_button(
             mtm,
             CGRect::new(CGPoint::new(468.0, 11.0), CGSize::new(260.0, 32.0)),
@@ -848,7 +870,7 @@ impl MainWindow {
             config.appearance,
             "Overlay position",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 446.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 514.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &settings_position_popup,
@@ -865,7 +887,7 @@ impl MainWindow {
             config.appearance,
             "Appearance",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 514.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 582.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &settings_appearance_toggle,
@@ -883,7 +905,7 @@ impl MainWindow {
             config.appearance,
             "Live preview",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 582.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 650.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &settings_live_switch,
@@ -901,7 +923,7 @@ impl MainWindow {
             config.appearance,
             "Sounds",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 650.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 718.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &settings_sound_switch,
@@ -919,7 +941,7 @@ impl MainWindow {
             config.appearance,
             "Microphone lane",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 718.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 786.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &settings_ambient_mic_switch,
@@ -937,7 +959,7 @@ impl MainWindow {
             config.appearance,
             "System audio lane",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 786.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 854.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &settings_ambient_system_switch,
@@ -954,7 +976,7 @@ impl MainWindow {
             config.appearance,
             "Permissions",
             CGRect::new(
-                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 854.0),
+                CGPoint::new(CONTENT_PADDING, WINDOW_HEIGHT - 922.0),
                 CGSize::new(SETTINGS_COLUMN_WIDTH, 54.0),
             ),
             &permission_shortcuts,
@@ -1000,6 +1022,7 @@ impl MainWindow {
             settings_view,
             settings_model_popup,
             settings_hotkey_popup,
+            settings_vision_provider_popup,
             settings_position_popup,
             settings_appearance_toggle,
             settings_live_switch,
@@ -1069,6 +1092,15 @@ impl MainWindow {
         }
         if let Some(index) = HOTKEYS.iter().position(|hotkey| hotkey.id == config.hotkey) {
             self.settings_hotkey_popup.selectItemAtIndex(index as isize);
+        }
+        if let Some(index) = VISION_PROVIDERS
+            .iter()
+            .position(|entry| entry.id == config.vision_provider)
+        {
+            self.settings_vision_provider_popup
+                .selectItemAtIndex(index as isize);
+        } else {
+            self.settings_vision_provider_popup.selectItemAtIndex(0);
         }
         if let Some(index) = POSITIONS
             .iter()

@@ -1,3 +1,4 @@
+use crate::config::{Config, VisionProvider};
 use crate::logging;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,8 @@ const HELPER_BINARY_NAME: &str = "screamer_vision_helper";
 const VISION_MAX_TOKENS: &str = "256";
 const MEDIA_MARKER: &str = "<__media__>";
 const APP_CONTENT_TOP_PCT: f64 = 14.0;
+/// Retina screenshots are often ~5M pixels; cloud APIs are much faster on smaller images.
+const CLOUD_VISION_MAX_LONG_EDGE: u32 = 1536;
 static NEXT_VISION_CROP_ID: AtomicU64 = AtomicU64::new(1);
 const SCREEN_HELPER_ANSWER_PROMPT: &str = "\
 You are Screamer's screen buddy. The screenshot is from a product, website, \
@@ -123,10 +126,10 @@ pub struct VisionResult {
 }
 
 /// Run a vision query: pass the user's transcribed question + screenshot to the
-/// multimodal Gemma 3 4B model and return the response with optional pointer target.
+/// configured vision backend (local Gemma, OpenAI, or Gemini) and return the response with optional pointer target.
 pub fn ask_about_screen(prompt: &str, screenshot_path: &Path) -> Result<VisionResult, String> {
-    logging::log_flow_event(
-        "vision",
+    let config = Config::load();
+    logging::log_vision_event(
         "query_start",
         &format!(
             "screenshot={} question_chars={}",
@@ -134,19 +137,18 @@ pub fn ask_about_screen(prompt: &str, screenshot_path: &Path) -> Result<VisionRe
             prompt.chars().count()
         ),
     );
-    logging::log_flow_block("vision", "user_question", prompt);
+    logging::log_vision_block("user_question", prompt);
 
     let answer_prompt = build_screen_helper_answer_prompt(prompt);
-    let answer_raw = run_vision_helper("answer", &answer_prompt, screenshot_path)?;
+    let answer_raw = run_vision_inference(&config, "answer", &answer_prompt, screenshot_path)?;
     let answer_cleaned = clean_model_response(&answer_raw);
-    logging::log_flow_block("vision", "answer_cleaned_output", &answer_cleaned);
+    logging::log_vision_block("answer_cleaned_output", &answer_cleaned);
 
     let (answer_without_point, answer_point) = extract_point(&answer_cleaned);
     let (answer_text, answer_box) = extract_box(&answer_without_point);
     let answer_text = answer_text.trim().to_string();
-    logging::log_flow_block("vision", "answer_text", &answer_text);
-    logging::log_flow_event(
-        "vision",
+    logging::log_vision_block("answer_text", &answer_text);
+    logging::log_vision_event(
         "answer_directives",
         &format!(
             "inline_point={} inline_box={}",
@@ -156,13 +158,27 @@ pub fn ask_about_screen(prompt: &str, screenshot_path: &Path) -> Result<VisionRe
     );
 
     let context = build_context(prompt, &answer_text);
-    logging::log_flow_block("vision", "context", &context);
+    logging::log_vision_block("context", &context);
 
-    let localized = localize_highlight(prompt, &answer_text, screenshot_path, &context);
     let answer_fallback =
         answer_point.or_else(|| answer_box.map(|rect| legacy_box_to_point(&context, rect)));
+    let localized = if config.vision_fast_screen_help {
+        logging::log_vision_event(
+            "localize_skip",
+            "vision_fast_screen_help: skipping localization model call",
+        );
+        None
+    } else if answer_fallback.is_some() {
+        logging::log_vision_event(
+            "localize_skip",
+            "answer_included_point_or_box; skipping second model call",
+        );
+        None
+    } else {
+        localize_highlight(prompt, &answer_text, screenshot_path, &context, &config)
+    };
     let highlight = choose_highlight(&context, localized.or(answer_fallback));
-    logging::log_flow_event("vision", "final_target", &describe_point_option(highlight));
+    logging::log_vision_event("final_target", &describe_point_option(highlight));
 
     Ok(VisionResult {
         text: answer_text,
@@ -170,7 +186,103 @@ pub fn ask_about_screen(prompt: &str, screenshot_path: &Path) -> Result<VisionRe
     })
 }
 
-fn run_vision_helper(
+/// Runs `f` with a path to a PNG suitable for cloud vision: scales down when the longest edge
+/// exceeds [`CLOUD_VISION_MAX_LONG_EDGE`], then deletes any temporary file afterward.
+fn with_cloud_vision_image<R>(
+    source: &Path,
+    f: impl FnOnce(&Path) -> Result<R, String>,
+) -> Result<R, String> {
+    let img = image::open(source).map_err(|err| {
+        format!(
+            "Failed to open screenshot {}: {err}",
+            source.display()
+        )
+    })?;
+    let (ow, oh) = (img.width(), img.height());
+    let long = ow.max(oh);
+    if long <= CLOUD_VISION_MAX_LONG_EDGE {
+        return f(source);
+    }
+    let scaled = img.thumbnail(CLOUD_VISION_MAX_LONG_EDGE, CLOUD_VISION_MAX_LONG_EDGE);
+    logging::log_vision_event(
+        "cloud_image_resize",
+        &format!(
+            "{}x{} -> {}x{} (max_long_edge={})",
+            ow,
+            oh,
+            scaled.width(),
+            scaled.height(),
+            CLOUD_VISION_MAX_LONG_EDGE
+        ),
+    );
+    let tmp = std::env::temp_dir().join(format!(
+        "screamer-vision-api-{}-{}.png",
+        std::process::id(),
+        NEXT_VISION_CROP_ID.fetch_add(1, Ordering::SeqCst)
+    ));
+    scaled.save(&tmp).map_err(|err| {
+        format!(
+            "Failed to write resized vision image {}: {err}",
+            tmp.display()
+        )
+    })?;
+    let out = f(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    out
+}
+
+fn run_vision_inference(
+    config: &Config,
+    stage: &str,
+    model_prompt: &str,
+    screenshot_path: &Path,
+) -> Result<String, String> {
+    match config.vision_provider {
+        VisionProvider::Local => {
+            run_local_vision_helper(stage, model_prompt, screenshot_path)
+        }
+        VisionProvider::Openai => {
+            with_cloud_vision_image(screenshot_path, |api_path| {
+                let _ = crate::logging::save_cloud_vision_debug_copy(api_path, stage, "openai");
+                let key = Config::resolve_openai_api_key()?;
+                logging::log_vision_event(
+                    stage,
+                    &format!(
+                        "backend=openai model={}",
+                        config.vision_openai_model.trim()
+                    ),
+                );
+                crate::vision_openai::complete_vision_multimodal(
+                    &key,
+                    config.vision_openai_model.trim(),
+                    model_prompt,
+                    api_path,
+                )
+            })
+        }
+        VisionProvider::Gemini => {
+            with_cloud_vision_image(screenshot_path, |api_path| {
+                let _ = crate::logging::save_cloud_vision_debug_copy(api_path, stage, "gemini");
+                let key = Config::resolve_gemini_api_key()?;
+                logging::log_vision_event(
+                    stage,
+                    &format!(
+                        "backend=gemini model={}",
+                        config.vision_gemini_model.trim()
+                    ),
+                );
+                crate::vision_gemini::complete_vision_multimodal(
+                    &key,
+                    config.vision_gemini_model.trim(),
+                    model_prompt,
+                    api_path,
+                )
+            })
+        }
+    }
+}
+
+fn run_local_vision_helper(
     stage: &str,
     model_prompt: &str,
     screenshot_path: &Path,
@@ -181,8 +293,7 @@ fn run_vision_helper(
         .to_str()
         .ok_or("Screenshot path contains invalid UTF-8")?;
 
-    logging::log_flow_event(
-        "vision",
+    logging::log_vision_event(
         stage,
         &format!(
             "helper={} image={} max_tokens={}",
@@ -191,7 +302,7 @@ fn run_vision_helper(
             VISION_MAX_TOKENS
         ),
     );
-    logging::log_flow_block("vision", &format!("{stage}_prompt"), model_prompt);
+    logging::log_vision_block(&format!("{stage}_prompt"), model_prompt);
 
     let mut child = Command::new(&helper_path)
         .arg("--image")
@@ -238,7 +349,7 @@ fn run_vision_helper(
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    logging::log_flow_block("vision", &format!("{stage}_raw_output"), &raw);
+    logging::log_vision_block(&format!("{stage}_raw_output"), &raw);
     Ok(raw)
 }
 
@@ -335,16 +446,14 @@ fn choose_highlight(context: &str, candidate: Option<ScreenPoint>) -> Option<Scr
 
     match candidate {
         Some(point) if point_matches_directional_cues(&context, &point) => {
-            logging::log_flow_event(
-                "vision",
+            logging::log_vision_event(
                 "highlight_choice",
                 &format!("accepted_candidate={}", point.describe()),
             );
             Some(point)
         }
         Some(point) => {
-            logging::log_flow_event(
-                "vision",
+            logging::log_vision_event(
                 "highlight_choice",
                 &format!(
                     "rejected_candidate={} reason=directional_mismatch",
@@ -352,18 +461,16 @@ fn choose_highlight(context: &str, candidate: Option<ScreenPoint>) -> Option<Scr
                 ),
             );
             let fallback = directional_fallback_point(&context);
-            logging::log_flow_event(
-                "vision",
+            logging::log_vision_event(
                 "highlight_fallback",
                 &describe_point_option(fallback),
             );
             fallback
         }
         None => {
-            logging::log_flow_event("vision", "highlight_choice", "no_candidate_from_model");
+            logging::log_vision_event("highlight_choice", "no_candidate_from_model");
             let fallback = directional_fallback_point(&context);
-            logging::log_flow_event(
-                "vision",
+            logging::log_vision_event(
                 "highlight_fallback",
                 &describe_point_option(fallback),
             );
@@ -553,10 +660,10 @@ fn localize_highlight(
     answer_text: &str,
     screenshot_path: &Path,
     context: &str,
+    config: &Config,
 ) -> Option<ScreenPoint> {
     let region = classify_localization_region(context);
-    logging::log_flow_event(
-        "vision",
+    logging::log_vision_event(
         "localize_region",
         &match region {
             Some(region) => format!("name={} rect={}", region.name, describe_region(region.rect)),
@@ -565,20 +672,24 @@ fn localize_highlight(
     );
 
     if let Some(region) = region {
-        if let Some(point) =
-            localize_highlight_in_crop(user_question, answer_text, screenshot_path, context, region)
-        {
+        if let Some(point) = localize_highlight_in_crop(
+            user_question,
+            answer_text,
+            screenshot_path,
+            context,
+            region,
+            config,
+        ) {
             return Some(point);
         }
-        logging::log_flow_event(
-            "vision",
+        logging::log_vision_event(
             "localize_crop_fallback",
             "crop_localization_failed_trying_full_image",
         );
     }
 
     let prompt = build_screen_helper_localize_prompt(user_question, answer_text);
-    let raw = run_vision_helper("localize_full", &prompt, screenshot_path).ok()?;
+    let raw = run_vision_inference(config, "localize_full", &prompt, screenshot_path).ok()?;
     let cleaned = clean_model_response(&raw);
     parse_localization_output("localize_full", &cleaned, context, None)
 }
@@ -589,12 +700,12 @@ fn localize_highlight_in_crop(
     screenshot_path: &Path,
     context: &str,
     region: LocalizationRegion,
+    config: &Config,
 ) -> Option<ScreenPoint> {
     let crop_path = match crop_image_to_region(screenshot_path, region.rect) {
         Ok(path) => path,
         Err(err) => {
-            logging::log_flow_event(
-                "vision",
+            logging::log_vision_event(
                 "localize_crop_error",
                 &format!("region={} error={err}", region.name),
             );
@@ -602,8 +713,7 @@ fn localize_highlight_in_crop(
         }
     };
 
-    logging::log_flow_event(
-        "vision",
+    logging::log_vision_event(
         "localize_crop_image",
         &format!(
             "region={} rect={} crop={}",
@@ -614,14 +724,13 @@ fn localize_highlight_in_crop(
     );
 
     let prompt = build_screen_helper_localize_crop_prompt(user_question, answer_text, region.name);
-    let raw = run_vision_helper("localize_crop", &prompt, &crop_path).ok();
+    let raw = run_vision_inference(config, "localize_crop", &prompt, &crop_path).ok();
     let result = raw.and_then(|raw| {
         let cleaned = clean_model_response(&raw);
         parse_localization_output("localize_crop", &cleaned, context, Some(region.rect))
     });
     let _ = std::fs::remove_file(&crop_path);
-    logging::log_flow_event(
-        "vision",
+    logging::log_vision_event(
         "localize_crop_cleanup",
         &format!("removed={}", crop_path.display()),
     );
@@ -698,13 +807,12 @@ fn parse_localization_output(
     context: &str,
     region: Option<ImageRegion>,
 ) -> Option<ScreenPoint> {
-    logging::log_flow_block("vision", &format!("{stage}_cleaned_output"), cleaned);
+    logging::log_vision_block(&format!("{stage}_cleaned_output"), cleaned);
 
     let (_, point) = extract_point(cleaned);
     if let Some(point) = point {
         let point = region.map_or(point, |region| remap_point_from_region(point, region));
-        logging::log_flow_event(
-            "vision",
+        logging::log_vision_event(
             stage,
             &format!("parsed_target={} source=point", point.describe()),
         );
@@ -715,8 +823,7 @@ fn parse_localization_output(
     if let Some(rect) = rect {
         let rect = region.map_or(rect, |region| remap_rect_from_region(rect, region));
         let point = legacy_box_to_point(context, rect);
-        logging::log_flow_event(
-            "vision",
+        logging::log_vision_event(
             stage,
             &format!(
                 "parsed_target={} source=legacy_box legacy_box={}",
@@ -727,8 +834,7 @@ fn parse_localization_output(
         return Some(point);
     }
 
-    logging::log_flow_event(
-        "vision",
+    logging::log_vision_event(
         stage,
         "parsed_target=none source=unparseable_output",
     );

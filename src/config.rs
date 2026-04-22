@@ -29,6 +29,36 @@ pub enum SummaryBackendPreference {
     Ollama,
 }
 
+/// Where multimodal “screen help” (Option hotkey) runs: local Gemma or a cloud API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionProvider {
+    #[default]
+    Local,
+    Openai,
+    Gemini,
+}
+
+pub struct VisionProviderInfo {
+    pub id: VisionProvider,
+    pub label: &'static str,
+}
+
+pub const VISION_PROVIDERS: &[VisionProviderInfo] = &[
+    VisionProviderInfo {
+        id: VisionProvider::Local,
+        label: "Local (Gemma on-device)",
+    },
+    VisionProviderInfo {
+        id: VisionProvider::Openai,
+        label: "OpenAI (cloud)",
+    },
+    VisionProviderInfo {
+        id: VisionProvider::Gemini,
+        label: "Google Gemini (cloud)",
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AmbientFinalBackendPreference {
     #[default]
@@ -151,6 +181,17 @@ pub struct Config {
     pub accessibility_helper_dismissed: bool,
     #[serde(default = "default_vision_hotkey")]
     pub vision_hotkey: String,
+    #[serde(default)]
+    pub vision_provider: VisionProvider,
+    #[serde(default = "default_vision_openai_model")]
+    pub vision_openai_model: String,
+    #[serde(default = "default_vision_gemini_model")]
+    pub vision_gemini_model: String,
+    /// When true, Screen help runs only the main answer vision call. Skips the second
+    /// localization pass (extra cloud round-trip or local helper run) that places the arrow;
+    /// highlights fall back to heuristics from the spoken answer text.
+    #[serde(default)]
+    pub vision_fast_screen_help: bool,
 }
 
 impl Default for Config {
@@ -170,6 +211,10 @@ impl Default for Config {
             show_accessibility_helper_on_launch: default_show_accessibility_helper_on_launch(),
             accessibility_helper_dismissed: false,
             vision_hotkey: default_vision_hotkey(),
+            vision_provider: VisionProvider::default(),
+            vision_openai_model: default_vision_openai_model(),
+            vision_gemini_model: default_vision_gemini_model(),
+            vision_fast_screen_help: false,
         }
     }
 }
@@ -200,6 +245,14 @@ fn default_show_accessibility_helper_on_launch() -> bool {
 
 fn default_vision_hotkey() -> String {
     "left_option".to_string()
+}
+
+fn default_vision_openai_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+
+fn default_vision_gemini_model() -> String {
+    "gemini-3.1-pro-preview".to_string()
 }
 
 pub struct ModelInfo {
@@ -282,6 +335,62 @@ impl Config {
     fn config_dir() -> PathBuf {
         let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("~"));
         base.join("Screamer")
+    }
+
+    /// For `OPENAI_API_KEY` file fallback (GUI apps often lack shell env).
+    pub fn resolve_openai_api_key() -> Result<String, String> {
+        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+            let k = k.trim().to_string();
+            if !k.is_empty() {
+                return Ok(k);
+            }
+        }
+        let path = Self::config_dir().join("openai_api_key");
+        if path.is_file() {
+            let s = fs::read_to_string(&path).map_err(|e| {
+                format!("Could not read OpenAI key file {}: {e}", path.display())
+            })?;
+            let k = s.lines().next().unwrap_or("").trim().to_string();
+            if !k.is_empty() {
+                return Ok(k);
+            }
+        }
+        Err(
+            "OpenAI API key not configured. Either set the OPENAI_API_KEY environment variable, \
+             or put your secret key on a single line in:\n\
+             ~/Library/Application Support/Screamer/openai_api_key\n\n\
+             When Screen help uses OpenAI, screenshots and prompts are sent to OpenAI. \
+             Rotate any key that was exposed elsewhere."
+                .to_string(),
+        )
+    }
+
+    /// For `GEMINI_API_KEY` file fallback (GUI apps often lack shell env).
+    pub fn resolve_gemini_api_key() -> Result<String, String> {
+        if let Ok(k) = std::env::var("GEMINI_API_KEY") {
+            let k = k.trim().to_string();
+            if !k.is_empty() {
+                return Ok(k);
+            }
+        }
+        let path = Self::config_dir().join("gemini_api_key");
+        if path.is_file() {
+            let s = fs::read_to_string(&path).map_err(|e| {
+                format!("Could not read Gemini key file {}: {e}", path.display())
+            })?;
+            let k = s.lines().next().unwrap_or("").trim().to_string();
+            if !k.is_empty() {
+                return Ok(k);
+            }
+        }
+        Err(
+            "Gemini API key not configured. Either set the GEMINI_API_KEY environment variable, \
+             or put your API key on a single line in:\n\
+             ~/Library/Application Support/Screamer/gemini_api_key\n\n\
+             When Screen help uses Gemini, screenshots and prompts are sent to Google. \
+             See https://ai.google.dev/gemini-api/docs — rotate any key that was exposed elsewhere."
+                .to_string(),
+        )
     }
 
     fn config_path() -> PathBuf {
@@ -415,6 +524,21 @@ impl Config {
             self.vision_hotkey = default.vision_hotkey;
         }
 
+        if !VISION_PROVIDERS
+            .iter()
+            .any(|entry| entry.id == self.vision_provider)
+        {
+            self.vision_provider = default.vision_provider;
+        }
+
+        if self.vision_openai_model.trim().is_empty() {
+            self.vision_openai_model = default_vision_openai_model();
+        }
+
+        if self.vision_gemini_model.trim().is_empty() {
+            self.vision_gemini_model = default_vision_gemini_model();
+        }
+
         self
     }
 }
@@ -443,6 +567,10 @@ mod tests {
         assert!(config.show_accessibility_helper_on_launch);
         assert!(!config.accessibility_helper_dismissed);
         assert_eq!(config.vision_hotkey, "left_option");
+        assert_eq!(config.vision_provider, VisionProvider::Local);
+        assert_eq!(config.vision_openai_model, "gpt-4o-mini");
+        assert_eq!(config.vision_gemini_model, "gemini-3.1-pro-preview");
+        assert!(!config.vision_fast_screen_help);
     }
 
     #[test]
@@ -462,6 +590,10 @@ mod tests {
             show_accessibility_helper_on_launch: false,
             accessibility_helper_dismissed: true,
             vision_hotkey: "right_option".to_string(),
+            vision_provider: VisionProvider::Openai,
+            vision_openai_model: "gpt-4o".to_string(),
+            vision_gemini_model: "gemini-2.5-flash".to_string(),
+            vision_fast_screen_help: true,
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: Config = serde_json::from_str(&json).unwrap();
@@ -482,6 +614,10 @@ mod tests {
         assert!(!parsed.show_accessibility_helper_on_launch);
         assert!(parsed.accessibility_helper_dismissed);
         assert_eq!(parsed.vision_hotkey, "right_option");
+        assert_eq!(parsed.vision_provider, VisionProvider::Openai);
+        assert_eq!(parsed.vision_openai_model, "gpt-4o");
+        assert_eq!(parsed.vision_gemini_model, "gemini-2.5-flash");
+        assert!(parsed.vision_fast_screen_help);
     }
 
     #[test]
@@ -504,6 +640,17 @@ mod tests {
         assert!(config.show_accessibility_helper_on_launch);
         assert!(!config.accessibility_helper_dismissed);
         assert_eq!(config.vision_hotkey, "left_option");
+        assert_eq!(config.vision_provider, VisionProvider::Local);
+        assert_eq!(config.vision_openai_model, "gpt-4o-mini");
+        assert_eq!(config.vision_gemini_model, "gemini-3.1-pro-preview");
+        assert!(!config.vision_fast_screen_help);
+    }
+
+    #[test]
+    fn config_parses_gemini_vision_provider() {
+        let json = r#"{"model":"base","hotkey":"left_control","vision_provider":"gemini"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.vision_provider, VisionProvider::Gemini);
     }
 
     #[test]

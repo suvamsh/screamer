@@ -137,8 +137,7 @@ impl HighlightOverlay {
         let target_point = screen_point_to_overlay_point(&target.point, target.capture_bounds);
         let geometry = resolve_arrow_geometry(target_point, target.point.side, overlay_frame);
 
-        logging::log_flow_event(
-            "highlight",
+        logging::log_highlight_event(
             "show",
             &format!(
                 "capture_bounds=({:.1}, {:.1}, {:.1}, {:.1}) target={} requested_side={} resolved_side={} tip=({:.1}, {:.1}) base=({:.1}, {:.1}) rotation_deg={:.1}",

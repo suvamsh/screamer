@@ -51,12 +51,12 @@ pub fn capture_screen() -> Result<CapturedScreen, String> {
 
     let path = screenshot_path();
     save_cgimage_as_png(&image, &path)?;
-    eprintln!(
+    crate::logging::eprint_vision_verbose_line(&format!(
         "[screamer] Vision screenshot saved {}x{} from {} display(s)",
         image.width(),
         image.height(),
         display_count
-    );
+    ));
 
     Ok(CapturedScreen {
         path,

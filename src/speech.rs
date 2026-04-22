@@ -12,8 +12,10 @@ const ONNX_RUNTIME_DYLIB_NAME: &str = "libonnxruntime.dylib";
 const AFPLAY_COMMAND: &str = "/usr/bin/afplay";
 const KOKORO_VOICE: &str = "af_sky";
 const KOKORO_SPEED: f32 = 1.08;
-const MAX_SPOKEN_CHARS: usize = 420;
-const MAX_SPOKEN_SENTENCES: usize = 3;
+/// Screen-help answers can be longer after higher vision token limits; keep TTS in sync so audio
+/// is not cut off while the overlay shows the full text.
+const MAX_SPOKEN_CHARS: usize = 1200;
+const MAX_SPOKEN_SENTENCES: usize = 8;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(40);
 
 static SPEECH_STATE: OnceLock<Mutex<SpeechState>> = OnceLock::new();
@@ -32,12 +34,27 @@ pub fn warm_up() {
 }
 
 pub fn speak(text: &str) -> Result<(), String> {
+    speak_with_completion(text, || ())
+}
+
+/// Like [`speak`], but runs `on_done` after playback finishes (or immediately if there is nothing to speak).
+/// `on_done` also runs if synthesis or thread startup fails, after optional cleanup.
+pub fn speak_with_completion<F>(text: &str, on_done: F) -> Result<(), String>
+where
+    F: FnOnce() + Send + 'static,
+{
     let spoken = prepare_spoken_text(text);
+    let mut on_done = Some(on_done);
     if spoken.is_empty() {
+        if let Some(f) = on_done.take() {
+            f();
+        }
         return Ok(());
     }
 
-    ensure_tts_runtime_available()?;
+    if let Err(err) = ensure_tts_runtime_available() {
+        return Err(err);
+    }
     let job_id = NEXT_SPEECH_JOB_ID.fetch_add(1, Ordering::SeqCst);
     let audio_path = speech_audio_path(job_id);
 
@@ -50,20 +67,24 @@ pub fn speak(text: &str) -> Result<(), String> {
         state.audio_path = Some(audio_path.clone());
     }
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("screamer-kokoro-tts".to_string())
         .spawn(move || {
-            if let Err(err) = monitor_speech_job(job_id, spoken, audio_path) {
-                eprintln!("[screamer] Speech synthesis error: {err}");
+            let result = monitor_speech_job(job_id, spoken, audio_path);
+            if let Err(ref err) = result {
                 finish_job(job_id);
+                eprintln!("[screamer] Speech synthesis error: {err}");
             }
-        })
-        .map_err(|err| {
+            if let Some(f) = on_done.take() {
+                f();
+            }
+        }) {
+        Ok(_) => Ok(()),
+        Err(err) => {
             finish_job(job_id);
-            format!("Failed to start speech monitor thread: {err}")
-        })?;
-
-    Ok(())
+            Err(format!("Failed to start speech monitor thread: {err}"))
+        }
+    }
 }
 
 pub fn stop() {
@@ -581,9 +602,12 @@ mod tests {
     }
 
     #[test]
-    fn limits_spoken_text_to_three_sentences() {
-        let text = "One. Two! Three? Four.";
+    fn limits_spoken_text_to_max_sentences() {
+        let text = "One. Two! Three? Four. Five. Six. Seven. Eight. Nine.";
 
-        assert_eq!(prepare_spoken_text(text), "One. Two! Three?");
+        assert_eq!(
+            prepare_spoken_text(text),
+            "One. Two! Three? Four. Five. Six. Seven. Eight."
+        );
     }
 }

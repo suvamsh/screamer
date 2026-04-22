@@ -1,5 +1,7 @@
 use crate::ambient_controller::AmbientController;
-use crate::config::{AppAppearance, Config, SummaryBackendPreference, HOTKEYS, MODELS, POSITIONS};
+use crate::config::{
+    AppAppearance, Config, SummaryBackendPreference, HOTKEYS, MODELS, POSITIONS, VISION_PROVIDERS,
+};
 use crate::diarization::default_diarization_engine;
 use crate::highlight::HighlightOverlay;
 use crate::logging;
@@ -74,6 +76,8 @@ pub struct App {
     live_transcript: Arc<Mutex<String>>,
     pending_completion_sound: Arc<AtomicBool>,
     recording_session: Arc<AtomicU64>,
+    /// Bumped when vision enters Loading or Response so stale TTS callbacks cannot clear a newer flow.
+    vision_ui_epoch: Arc<AtomicU64>,
     vision_overlay_state: Arc<Mutex<crate::overlay::VisionOverlayState>>,
     highlight_overlay: Rc<RefCell<HighlightOverlay>>,
 }
@@ -311,6 +315,11 @@ fn menu_handler_class() -> &'static AnyClass {
                 select_hotkey_popup_action as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
             builder.add_method(
+                sel!(selectVisionBackendPopup:),
+                select_vision_backend_popup_action
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
                 sel!(selectVisionHotkeyPopup:),
                 select_vision_hotkey_popup_action
                     as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
@@ -492,6 +501,15 @@ extern "C" fn select_model_popup_action(_this: *mut AnyObject, _sel: Sel, sender
 extern "C" fn select_hotkey_popup_action(_this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject) {
     let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
     apply_hotkey_selection(index as usize);
+}
+
+extern "C" fn select_vision_backend_popup_action(
+    _this: *mut AnyObject,
+    _sel: Sel,
+    sender: *mut AnyObject,
+) {
+    let index: isize = unsafe { msg_send![sender, indexOfSelectedItem] };
+    apply_vision_provider_selection(index as usize);
 }
 
 extern "C" fn select_vision_hotkey_popup_action(
@@ -767,6 +785,31 @@ fn apply_position_selection(index: usize) {
                 }
             }
         });
+        rebuild_status_menu(mtm);
+    }
+    sync_settings_window(&config);
+}
+
+fn apply_vision_provider_selection(index: usize) {
+    let Some(entry) = VISION_PROVIDERS.get(index) else {
+        sync_settings_window(&Config::load());
+        return;
+    };
+
+    let mut config = Config::load();
+    if config.vision_provider == entry.id {
+        sync_settings_window(&config);
+        return;
+    }
+
+    eprintln!(
+        "[screamer] Vision screen-help backend: {}",
+        entry.label
+    );
+    config.vision_provider = entry.id;
+    config.save();
+
+    if let Some(mtm) = MainThreadMarker::new() {
         rebuild_status_menu(mtm);
     }
     sync_settings_window(&config);
@@ -1244,6 +1287,7 @@ impl App {
             live_transcript: Arc::new(Mutex::new(String::new())),
             pending_completion_sound: Arc::new(AtomicBool::new(false)),
             recording_session: Arc::new(AtomicU64::new(0)),
+            vision_ui_epoch: Arc::new(AtomicU64::new(0)),
             vision_overlay_state: Arc::new(Mutex::new(crate::overlay::VisionOverlayState::Hidden)),
             highlight_overlay,
         })
@@ -1430,6 +1474,7 @@ impl App {
         let session_vis = self.recording_session.clone();
         let vision_state_vis_press = self.vision_overlay_state.clone();
         let vision_state_vis_release = self.vision_overlay_state.clone();
+        let vision_ui_epoch_vis = self.vision_ui_epoch.clone();
         let vision_screenshot: Arc<Mutex<Option<crate::screenshot::CapturedScreen>>> =
             Arc::new(Mutex::new(None));
         let vision_screenshot_release = vision_screenshot.clone();
@@ -1588,12 +1633,11 @@ impl App {
                 // Capture screenshot immediately
                 match crate::screenshot::capture_screen() {
                     Ok(screenshot) => {
-                        eprintln!(
+                        logging::eprint_vision_verbose_line(&format!(
                             "[screamer] Vision screenshot captured: {}",
                             screenshot.path.display()
-                        );
-                        logging::log_flow_event(
-                            "vision",
+                        ));
+                        logging::log_vision_event(
                             "capture",
                             &format!(
                                 "path={} bounds=({:.1}, {:.1}, {:.1}, {:.1})",
@@ -1719,7 +1763,8 @@ impl App {
                         }
                     };
 
-                    // Set loading state
+                    // Set loading state (bump epoch first so stale TTS dismiss callbacks cannot apply)
+                    vision_ui_epoch_vis.fetch_add(1, Ordering::SeqCst);
                     if let Ok(mut vs) = vision_state_vis_release.lock() {
                         *vs = crate::overlay::VisionOverlayState::Loading;
                     }
@@ -1728,23 +1773,25 @@ impl App {
                     let pending_sound = pending_sound_vis.clone();
                     let sfx = sfx_vis_release.clone();
                     let vision_state = vision_state_vis_release.clone();
+                    let vision_ui_epoch_thread = vision_ui_epoch_vis.clone();
 
                     std::thread::spawn(move || {
                         let mut should_play_completion_sound = true;
                         match t.transcribe_profiled(&samples[transcribe_window.range]) {
                             Ok(result) if !result.text.is_empty() => {
-                                eprintln!(
+                                logging::eprint_vision_verbose_line(&format!(
                                     "[screamer] Vision transcribed in {}ms ({} chars)",
                                     result.profile.total.as_millis(),
                                     result.text.chars().count()
-                                );
+                                ));
                                 logging::log_transcript("Vision transcript", &result.text);
 
                                 if let Some(screenshot) = screenshot.as_ref() {
-                                    eprintln!("[screamer] Vision: asking model about screenshot...");
+                                    logging::eprint_vision_verbose_line(
+                                        "[screamer] Vision: asking model about screenshot...",
+                                    );
                                     let vision_t0 = std::time::Instant::now();
-                                    logging::log_flow_event(
-                                        "vision",
+                                    logging::log_vision_event(
                                         "app_dispatch",
                                         &format!(
                                             "screenshot={} transcript_chars={}",
@@ -1757,14 +1804,13 @@ impl App {
                                         &screenshot.path,
                                     ) {
                                         Ok(vision_result) => {
-                                            eprintln!(
+                                            logging::eprint_vision_verbose_line(&format!(
                                                 "[screamer] Vision response in {}ms ({} chars):\n{}",
                                                 vision_t0.elapsed().as_millis(),
                                                 vision_result.text.len(),
                                                 vision_result.text
-                                            );
-                                            logging::log_flow_event(
-                                                "vision",
+                                            ));
+                                            logging::log_vision_event(
                                                 "app_result",
                                                 &format!(
                                                     "latency_ms={} spoken_chars={} highlight={}",
@@ -1777,25 +1823,49 @@ impl App {
                                                         .unwrap_or_else(|| "NONE".to_string())
                                                 ),
                                             );
-                                            match crate::speech::speak(&vision_result.text) {
+                                            let dismiss_epoch = vision_ui_epoch_thread
+                                                .fetch_add(1, Ordering::SeqCst)
+                                                + 1;
+                                            let highlight = vision_result.highlight.map(|point| {
+                                                crate::highlight::HighlightTarget {
+                                                    point,
+                                                    capture_bounds: screenshot.bounds,
+                                                }
+                                            });
+                                            if let Ok(mut vs) = vision_state.lock() {
+                                                *vs = crate::overlay::VisionOverlayState::Response(
+                                                    vision_result.text.clone(),
+                                                    highlight,
+                                                );
+                                            }
+                                            let epoch_for_done = vision_ui_epoch_thread.clone();
+                                            let vision_state_done = vision_state.clone();
+                                            match crate::speech::speak_with_completion(
+                                                &vision_result.text,
+                                                move || {
+                                                    if epoch_for_done.load(Ordering::SeqCst)
+                                                        != dismiss_epoch
+                                                    {
+                                                        return;
+                                                    }
+                                                    if let Ok(mut vs) = vision_state_done.lock() {
+                                                        *vs = crate::overlay::VisionOverlayState::Hidden;
+                                                    }
+                                                },
+                                            ) {
                                                 Ok(()) => {
                                                     should_play_completion_sound = false;
                                                 }
                                                 Err(err) => {
                                                     eprintln!("[screamer] Vision speech error: {err}");
-                                                }
-                                            }
-                                            if let Ok(mut vs) = vision_state.lock() {
-                                                let highlight = vision_result.highlight.map(|point| {
-                                                    crate::highlight::HighlightTarget {
-                                                        point,
-                                                        capture_bounds: screenshot.bounds,
+                                                    if vision_ui_epoch_thread.load(Ordering::SeqCst)
+                                                        == dismiss_epoch
+                                                    {
+                                                        if let Ok(mut vs) = vision_state.lock() {
+                                                            *vs = crate::overlay::VisionOverlayState::Hidden;
+                                                        }
                                                     }
-                                                });
-                                                *vs = crate::overlay::VisionOverlayState::Response(
-                                                    vision_result.text,
-                                                    highlight,
-                                                );
+                                                }
                                             }
                                         }
                                         Err(err) => {
@@ -1918,6 +1988,11 @@ impl App {
                         if !ov.is_visible() {
                             ov.show();
                         }
+                        // Recording has stopped; drive the waveform toward silence so the HUD
+                        // does not look frozen mid-capture while Loading / Response are shown.
+                        let silent = [0f32; WAVEFORM_BINS];
+                        ov.update_waveform(&silent);
+                        ov.update_transcript("");
                         ov.set_vision_state(vision_state);
                     } else if ov.is_visible() {
                         ov.hide();
