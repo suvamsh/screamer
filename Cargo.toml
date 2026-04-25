@@ -108,7 +108,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 llama_cpp_2 = { package = "llama-cpp-2", version = "0.1.141", default-features = false, features = ["metal", "mtmd"] }
 hound = "3"
 kokoro-micro = "1.0"
-ort = { version = "=2.0.0-rc.11", default-features = false, features = ["load-dynamic"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
 tokio = { version = "1.45", features = ["net", "rt", "time"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
